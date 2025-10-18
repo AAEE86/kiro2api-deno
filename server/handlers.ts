@@ -99,10 +99,11 @@ async function handleStreamRequest(
   const stream = new ReadableStream({
     async start(controller) {
       try {
-        const response = await fetch(`${AWS_ENDPOINTS.CODEWHISPERER}/`, {
+        const response = await fetch(AWS_ENDPOINTS.CODEWHISPERER, {
           method: "POST",
           headers: {
-            "Content-Type": "application/json",
+            "Content-Type": "application/x-amz-json-1.1",
+            "X-Amz-Target": "AWSCognitoIdentityProviderService.SendMessage",
             "Authorization": `Bearer ${tokenInfo.accessToken}`,
           },
           body: JSON.stringify(cwReq),
@@ -201,10 +202,11 @@ async function handleNonStreamRequest(
 
   console.log("Sending request to CodeWhisperer:", JSON.stringify(cwReq, null, 2));
 
-  const response = await fetch(`${AWS_ENDPOINTS.CODEWHISPERER}/`, {
+  const response = await fetch(AWS_ENDPOINTS.CODEWHISPERER, {
     method: "POST",
     headers: {
-      "Content-Type": "application/json",
+      "Content-Type": "application/x-amz-json-1.1",
+      "X-Amz-Target": "AWSCognitoIdentityProviderService.SendMessage",
       "Authorization": `Bearer ${tokenInfo.accessToken}`,
     },
     body: JSON.stringify(cwReq),

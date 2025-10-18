@@ -10,7 +10,7 @@ export const MODEL_MAP: Record<string, string> = {
 export const AWS_ENDPOINTS = {
   SOCIAL_REFRESH: "https://iam-identitycenter-auth.us-east-1.amazonaws.com/token/refresh",
   IDC_REFRESH: "https://oidc.us-east-1.amazonaws.com/token",
-  CODEWHISPERER: "https://codewhisperer.us-east-1.amazonaws.com",
+  CODEWHISPERER: "https://codewhisperer.us-east-1.amazonaws.com/v1/conversations",
 };
 
 // Default values
