@@ -216,29 +216,42 @@ async function handleNonStreamRequest(
     throw new Error(`CodeWhisperer API error: ${response.status}`);
   }
 
-  // Read response as text first to handle SSE format
-  const responseText = await response.text();
-  console.log("CodeWhisperer raw response:", responseText.substring(0, 500));
+  // Read response as binary (AWS EventStream format)
+  const responseBuffer = await response.arrayBuffer();
+  const data = new Uint8Array(responseBuffer);
+  console.log("CodeWhisperer response size:", data.length);
 
-  // Parse SSE format response
+  // Parse AWS EventStream binary format
   let content = "";
-  const lines = responseText.split("\n");
-  
-  for (const line of lines) {
-    if (line.startsWith("data:")) {
-      try {
-        const jsonStr = line.substring(5).trim();
-        const event = JSON.parse(jsonStr);
-        if (event.content) {
-          content += event.content;
-        }
-      } catch {
-        // Skip invalid JSON lines
+  let offset = 0;
+
+  while (offset < data.length) {
+    if (offset + 16 > data.length) break;
+
+    // Read message length (4 bytes, big-endian)
+    const totalLength = new DataView(data.buffer, offset, 4).getUint32(0, false);
+    const headerLength = new DataView(data.buffer, offset + 4, 4).getUint32(0, false);
+
+    if (offset + totalLength > data.length) break;
+
+    // Extract payload
+    const payloadStart = offset + 12 + headerLength;
+    const payloadEnd = offset + totalLength - 4;
+    const payloadData = data.slice(payloadStart, payloadEnd);
+
+    try {
+      const payload = JSON.parse(new TextDecoder().decode(payloadData));
+      if (payload.content) {
+        content += payload.content;
       }
+    } catch {
+      // Skip invalid payload
     }
+
+    offset += totalLength;
   }
 
-  console.log("Extracted content length:", content.length);
+  console.log("Extracted content:", content);
 
   // Convert response to Anthropic format
   const anthropicResponse = {
