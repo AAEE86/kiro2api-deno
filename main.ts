@@ -157,8 +157,16 @@ async function handleRequestWithInit(req: Request): Promise<Response> {
   }
 }
 
-// Main function for local development
+// Check if running in Deno Deploy
+const isDenoDeployment = Deno.env.get("DENO_DEPLOYMENT_ID") !== undefined;
+
+// Main function for local development only
 async function main() {
+  if (isDenoDeployment) {
+    console.log("Running in Deno Deploy, skipping local server setup");
+    return;
+  }
+
   const port = parseInt(Deno.env.get("PORT") || String(DEFAULTS.PORT));
 
   try {
@@ -181,18 +189,16 @@ async function main() {
     }, handleRequestWithInit);
   } catch (error) {
     console.error("Fatal error:", error);
-    throw error; // Re-throw instead of Deno.exit
+    throw error;
   }
 }
 
 // Export handler for Deno Deploy
 export default { fetch: handleRequestWithInit };
 
-// Run the server if executed directly (local development only)
-if (import.meta.main) {
+// Run the server if executed directly and not in Deno Deploy
+if (import.meta.main && !isDenoDeployment) {
   main().catch((error) => {
     console.error("Failed to start server:", error);
-    // Let the error propagate naturally
-    // Do not call Deno.exit() as it's not allowed in cloud environments
   });
 }
