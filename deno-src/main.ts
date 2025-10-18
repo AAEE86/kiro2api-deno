@@ -37,7 +37,7 @@ async function main() {
       error: err instanceof Error ? err.message : String(err),
       stack: err instanceof Error ? err.stack : undefined,
     });
-    Deno.exit(1);
+    throw err;
   }
 }
 

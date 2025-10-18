@@ -21,7 +21,7 @@ async function main() {
     error("启动失败", {
       error: err instanceof Error ? err.message : String(err)
     });
-    Deno.exit(1);
+    throw err;
   }
 }
 
