@@ -199,6 +199,8 @@ async function handleNonStreamRequest(
   const conversationId = crypto.randomUUID();
   const cwReq = anthropicToCodeWhisperer(anthropicReq, conversationId);
 
+  console.log("Sending request to CodeWhisperer:", JSON.stringify(cwReq, null, 2));
+
   const response = await fetch(`${AWS_ENDPOINTS.CODEWHISPERER}/`, {
     method: "POST",
     headers: {
@@ -209,10 +211,23 @@ async function handleNonStreamRequest(
   });
 
   if (!response.ok) {
+    const errorText = await response.text();
+    console.error(`CodeWhisperer API error: ${response.status}`, errorText);
     throw new Error(`CodeWhisperer API error: ${response.status}`);
   }
 
   const cwResponse = await response.json();
+  console.log("CodeWhisperer response:", JSON.stringify(cwResponse, null, 2));
+
+  // Extract content from CodeWhisperer response
+  let content = "";
+  if (cwResponse.assistantResponseMessage?.content) {
+    content = cwResponse.assistantResponseMessage.content;
+  } else if (cwResponse.content) {
+    content = cwResponse.content;
+  } else if (cwResponse.message) {
+    content = cwResponse.message;
+  }
 
   // Convert response to Anthropic format
   const anthropicResponse = {
@@ -223,13 +238,13 @@ async function handleNonStreamRequest(
     content: [
       {
         type: "text",
-        text: cwResponse.content || "",
+        text: content,
       },
     ],
     stop_reason: "end_turn",
     usage: {
-      input_tokens: 0,
-      output_tokens: 0,
+      input_tokens: cwResponse.usage?.inputTokens || 0,
+      output_tokens: cwResponse.usage?.outputTokens || 0,
     },
   };
 
