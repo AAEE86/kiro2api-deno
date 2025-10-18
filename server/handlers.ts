@@ -216,18 +216,29 @@ async function handleNonStreamRequest(
     throw new Error(`CodeWhisperer API error: ${response.status}`);
   }
 
-  const cwResponse = await response.json();
-  console.log("CodeWhisperer response:", JSON.stringify(cwResponse, null, 2));
+  // Read response as text first to handle SSE format
+  const responseText = await response.text();
+  console.log("CodeWhisperer raw response:", responseText.substring(0, 500));
 
-  // Extract content from CodeWhisperer response
+  // Parse SSE format response
   let content = "";
-  if (cwResponse.assistantResponseMessage?.content) {
-    content = cwResponse.assistantResponseMessage.content;
-  } else if (cwResponse.content) {
-    content = cwResponse.content;
-  } else if (cwResponse.message) {
-    content = cwResponse.message;
+  const lines = responseText.split("\n");
+  
+  for (const line of lines) {
+    if (line.startsWith("data:")) {
+      try {
+        const jsonStr = line.substring(5).trim();
+        const event = JSON.parse(jsonStr);
+        if (event.content) {
+          content += event.content;
+        }
+      } catch {
+        // Skip invalid JSON lines
+      }
+    }
   }
+
+  console.log("Extracted content length:", content.length);
 
   // Convert response to Anthropic format
   const anthropicResponse = {
@@ -243,8 +254,8 @@ async function handleNonStreamRequest(
     ],
     stop_reason: "end_turn",
     usage: {
-      input_tokens: cwResponse.usage?.inputTokens || 0,
-      output_tokens: cwResponse.usage?.outputTokens || 0,
+      input_tokens: 0,
+      output_tokens: Math.max(1, Math.ceil(content.length / 4)),
     },
   };
 
