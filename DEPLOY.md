@@ -20,8 +20,7 @@ Deno Deploy 是最简单的云部署方式，提供全球边缘计算节点。
    - 连接你的 GitHub 仓库
    - 选择 `deno-impl/main.ts` 作为入口点
 
-3. **配置环境变量**
-   在 Deno Deploy 项目设置中添加：
+3. **配置环境变量** 在 Deno Deploy 项目设置中添加：
    ```
    KIRO_CLIENT_TOKEN=your-secure-token
    KIRO_AUTH_TOKEN=[{"auth":"Social","refreshToken":"your_token"}]
@@ -59,7 +58,7 @@ on:
   push:
     branches: [main]
     paths:
-      - 'deno-impl/**'
+      - "deno-impl/**"
 
 jobs:
   deploy:
@@ -70,7 +69,7 @@ jobs:
 
     steps:
       - uses: actions/checkout@v3
-      
+
       - uses: denoland/setup-deno@v1
         with:
           deno-version: v2.x
@@ -86,6 +85,7 @@ jobs:
 ```
 
 在 GitHub 仓库设置中添加 Secrets：
+
 - `DENO_DEPLOY_TOKEN`: 从 Deno Deploy 获取
 - `KIRO_CLIENT_TOKEN`: 你的 API token
 - `KIRO_AUTH_TOKEN`: AWS 认证配置
@@ -262,6 +262,7 @@ curl https://your-domain.com/api/tokens
 **错误**: `KIRO_CLIENT_TOKEN environment variable not set`
 
 **解决**:
+
 - Deno Deploy: 在项目设置中添加环境变量
 - Docker: 检查 .env 文件或 docker-compose.yml
 - VPS: 检查 systemd EnvironmentFile 路径
@@ -271,6 +272,7 @@ curl https://your-domain.com/api/tokens
 **错误**: `Token refresh failed`
 
 **解决**:
+
 - 检查 KIRO_AUTH_TOKEN 格式是否正确
 - 确认 AWS token 未过期
 - 验证网络连接到 AWS 服务
@@ -280,6 +282,7 @@ curl https://your-domain.com/api/tokens
 **本地开发错误**: `PermissionDenied`
 
 **解决**:
+
 ```bash
 # 确保授予所需权限
 deno run --allow-net --allow-env --allow-read main.ts
@@ -321,10 +324,10 @@ services:
     deploy:
       resources:
         limits:
-          cpus: '1'
+          cpus: "1"
           memory: 512M
         reservations:
-          cpus: '0.5'
+          cpus: "0.5"
           memory: 256M
 ```
 
@@ -350,6 +353,7 @@ pm2 startup
 4. 文档化你的部署流程
 
 更多信息：
+
 - [Deno Deploy 文档](https://deno.com/deploy/docs)
 - [Docker 文档](https://docs.docker.com/)
 - [主项目 README](../README.md)

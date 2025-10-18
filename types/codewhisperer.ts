@@ -74,4 +74,9 @@ export interface AssistantResponseEvent {
     content: string;
     userIntent?: string;
   };
+  // Tool use fields
+  toolUseId?: string;
+  name?: string;
+  input?: Record<string, unknown> | string;
+  stop?: boolean;
 }

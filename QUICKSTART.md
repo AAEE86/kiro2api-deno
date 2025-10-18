@@ -68,19 +68,23 @@ docker-compose down
 ## 常见问题
 
 ### Q: 如何获取 AWS token？
+
 A: 查看主项目 README.md 中的"Token获取方式"部分
 
 ### Q: 端口被占用怎么办？
+
 ```bash
 PORT=8081 deno task start
 ```
 
 ### Q: 如何启用调试日志？
+
 ```bash
 LOG_LEVEL=debug deno task start
 ```
 
 ### Q: 需要安装什么依赖吗？
+
 A: 不需要！Deno 会自动下载所需的一切
 
 ## 性能测试
@@ -104,6 +108,7 @@ deno task dev
 ## 下一步
 
 详细文档请参阅：
+
 - [完整 README](./README.md)
 - [主项目文档](../README.md)
 - [Deno 文档](https://deno.land/manual)

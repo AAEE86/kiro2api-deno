@@ -2,11 +2,13 @@
 
 **高性能 AI API 代理服务器 - Deno 版本**
 
-这是 kiro2api 的 Deno/TypeScript 实现，提供与 Go 版本相同的功能，但具有更简洁的代码和更快的启动时间。
+这是 kiro2api 的 Deno/TypeScript 实现，提供与 Go
+版本相同的功能，但具有更简洁的代码和更快的启动时间。
 
 ## 特性
 
 ### 核心功能
+
 - ✅ **完整 API 兼容**: 支持 Anthropic 和 OpenAI API 格式
 - ✅ **多账号池管理**: 顺序选择策略，自动故障转移
 - ✅ **双认证方式**: Social 和 IdC 认证
@@ -15,6 +17,7 @@
 - ✅ **工具调用**: 完整的 tool use 支持
 
 ### Deno 优势
+
 - 🚀 **快速启动**: 毫秒级启动时间
 - 🔒 **安全默认**: 权限模型，显式声明所需权限
 - 📦 **单文件部署**: 可编译为单个可执行文件
@@ -24,6 +27,7 @@
 ## 快速开始
 
 ### 前置要求
+
 - Deno 2.0+ ([安装指南](https://deno.land/manual/getting_started/installation))
 
 ### 本地运行
@@ -87,13 +91,13 @@ deno task compile
 
 ### 支持的端点
 
-| 端点 | 方法 | 描述 |
-|------|------|------|
-| `/` | GET | 欢迎信息 |
-| `/api/tokens` | GET | Token 池状态（无需认证） |
-| `/v1/models` | GET | 获取可用模型列表 |
-| `/v1/messages` | POST | Anthropic API 兼容接口 |
-| `/v1/chat/completions` | POST | OpenAI API 兼容接口 |
+| 端点                   | 方法 | 描述                     |
+| ---------------------- | ---- | ------------------------ |
+| `/`                    | GET  | 欢迎信息                 |
+| `/api/tokens`          | GET  | Token 池状态（无需认证） |
+| `/v1/models`           | GET  | 获取可用模型列表         |
+| `/v1/messages`         | POST | Anthropic API 兼容接口   |
+| `/v1/chat/completions` | POST | OpenAI API 兼容接口      |
 
 ### 使用示例
 
@@ -145,10 +149,12 @@ curl -N -X POST http://localhost:8080/v1/messages \
 ### 环境变量
 
 #### 必需配置
+
 - `KIRO_AUTH_TOKEN`: AWS 认证配置（JSON 数组）
 - `KIRO_CLIENT_TOKEN`: API 认证密钥
 
 #### 可选配置
+
 - `PORT`: 服务端口（默认：8080）
 - `LOG_LEVEL`: 日志级别（默认：info）
 
@@ -212,24 +218,24 @@ deno-impl/
 
 ## 支持的模型
 
-| 模型名称 | CodeWhisperer 模型 ID |
-|---------|----------------------|
+| 模型名称                     | CodeWhisperer 模型 ID             |
+| ---------------------------- | --------------------------------- |
 | `claude-sonnet-4-5-20250929` | `CLAUDE_SONNET_4_5_20250929_V1_0` |
-| `claude-sonnet-4-20250514` | `CLAUDE_SONNET_4_20250514_V1_0` |
+| `claude-sonnet-4-20250514`   | `CLAUDE_SONNET_4_20250514_V1_0`   |
 | `claude-3-7-sonnet-20250219` | `CLAUDE_3_7_SONNET_20250219_V1_0` |
-| `claude-3-5-haiku-20241022` | `auto` |
+| `claude-3-5-haiku-20241022`  | `auto`                            |
 
 ## 性能对比
 
 与 Go 版本相比：
 
-| 指标 | Go 版本 | Deno 版本 |
-|-----|--------|----------|
-| 启动时间 | ~50ms | ~10ms |
-| 内存占用 | ~20MB | ~30MB |
-| 二进制大小 | ~15MB | ~100MB* |
-| 热重载 | ❌ | ✅ |
-| 类型安全 | ⚠️ | ✅ |
+| 指标       | Go 版本 | Deno 版本 |
+| ---------- | ------- | --------- |
+| 启动时间   | ~50ms   | ~10ms     |
+| 内存占用   | ~20MB   | ~30MB     |
+| 二进制大小 | ~15MB   | ~100MB*   |
+| 热重载     | ❌      | ✅        |
+| 类型安全   | ⚠️      | ✅        |
 
 \* 编译后的单文件可执行文件包含完整的 Deno 运行时
 
@@ -264,18 +270,21 @@ deno check main.ts
 ### 常见问题
 
 #### 1. 权限错误
+
 ```bash
 # 确保授予足够的权限
 deno run --allow-net --allow-env --allow-read main.ts
 ```
 
 #### 2. Token 认证失败
+
 ```bash
 # 检查 KIRO_AUTH_TOKEN 格式
 deno run --allow-env -e 'console.log(Deno.env.get("KIRO_AUTH_TOKEN"))'
 ```
 
 #### 3. 端口被占用
+
 ```bash
 # 更改端口
 PORT=8081 deno task start
@@ -291,12 +300,14 @@ LOG_LEVEL=debug deno task start
 ## 与 Go 版本的区别
 
 ### 实现差异
+
 - 使用 Deno 原生 HTTP 服务器代替 Gin
 - 使用标准 JSON 解析代替 sonic
 - 简化了流式解析逻辑
 - 移除了复杂的并发控制（Deno 自动处理）
 
 ### 功能完整性
+
 - ✅ 核心功能完全兼容
 - ✅ API 接口完全兼容
 - ⚠️ 部分高级特性简化实现
