@@ -69,6 +69,20 @@ deno task compile
 ./kiro2api
 ```
 
+### 云部署（Deno Deploy）
+
+**最简单的部署方式，无需服务器！**
+
+1. 访问 [dash.deno.com](https://dash.deno.com)
+2. 连接 GitHub 仓库
+3. 选择 `deno-impl/main.ts` 作为入口点
+4. 配置环境变量：
+   - `KIRO_CLIENT_TOKEN`
+   - `KIRO_AUTH_TOKEN`
+5. 自动部署完成！
+
+详细部署指南请查看 [DEPLOY.md](./DEPLOY.md)
+
 ## API 接口
 
 ### 支持的端点

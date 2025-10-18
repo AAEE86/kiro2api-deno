@@ -97,40 +97,73 @@ async function handleRequest(
   }
 }
 
-// Main function
-async function main() {
+// Global variables for cloud deployment
+let globalAuthService: AuthService | null = null;
+let globalClientToken: string | null = null;
+
+// Initialize function (called once on startup)
+async function initialize() {
+  // Load environment variables from .env file if it exists (local only)
   try {
-    // Load environment variables from .env file if it exists
-    try {
-      const env = await Deno.readTextFile(".env");
-      env.split("\n").forEach((line) => {
-        const match = line.match(/^([^=]+)=(.*)$/);
-        if (match) {
-          const [, key, value] = match;
-          Deno.env.set(key.trim(), value.trim());
-        }
-      });
-      console.log("Loaded .env file");
-    } catch {
-      console.log("No .env file found, using environment variables");
+    const env = await Deno.readTextFile(".env");
+    env.split("\n").forEach((line) => {
+      const match = line.match(/^([^=]+)=(.*)$/);
+      if (match) {
+        const [, key, value] = match;
+        Deno.env.set(key.trim(), value.trim());
+      }
+    });
+    console.log("Loaded .env file");
+  } catch {
+    // .env file not found, using environment variables
+  }
+
+  // Get configuration
+  globalClientToken = Deno.env.get("KIRO_CLIENT_TOKEN");
+
+  if (!globalClientToken) {
+    throw new Error(
+      "KIRO_CLIENT_TOKEN environment variable not set. Please configure it in your deployment settings.",
+    );
+  }
+
+  // Create AuthService
+  console.log("Initializing AuthService...");
+  globalAuthService = await AuthService.create();
+  console.log("AuthService initialized successfully");
+}
+
+// Request handler wrapper with lazy initialization
+async function handleRequestWithInit(req: Request): Promise<Response> {
+  try {
+    // Initialize on first request if not already done
+    if (!globalAuthService || !globalClientToken) {
+      await initialize();
     }
 
-    // Get configuration
-    const port = parseInt(Deno.env.get("PORT") || String(DEFAULTS.PORT));
-    const clientToken = Deno.env.get("KIRO_CLIENT_TOKEN");
+    return await handleRequest(req, globalAuthService!, globalClientToken!);
+  } catch (error) {
+    console.error("Request handling error:", error);
+    return new Response(
+      JSON.stringify({
+        error: "Service initialization failed",
+        message: error.message,
+      }),
+      {
+        status: 503,
+        headers: { "Content-Type": "application/json" },
+      },
+    );
+  }
+}
 
-    if (!clientToken) {
-      console.error("Error: KIRO_CLIENT_TOKEN environment variable not set");
-      console.error("Please set KIRO_CLIENT_TOKEN in .env file or environment");
-      Deno.exit(1);
-    }
+// Main function for local development
+async function main() {
+  const port = parseInt(Deno.env.get("PORT") || String(DEFAULTS.PORT));
 
-    // Create AuthService
-    console.log("Initializing AuthService...");
-    const authService = await AuthService.create();
-    console.log("AuthService initialized successfully");
+  try {
+    await initialize();
 
-    // Start server
     console.log(`Starting server on port ${port}...`);
 
     Deno.serve({
@@ -145,14 +178,23 @@ async function main() {
         console.log(`  POST /v1/chat/completions     - OpenAI API endpoint`);
         console.log(`\nPress Ctrl+C to stop\n`);
       },
-    }, (req) => handleRequest(req, authService, clientToken));
+    }, handleRequestWithInit);
   } catch (error) {
     console.error("Fatal error:", error);
-    Deno.exit(1);
+    throw error; // Re-throw instead of Deno.exit
   }
 }
 
-// Run the server
+// Export handler for Deno Deploy
+export default { fetch: handleRequestWithInit };
+
+// Run the server if executed directly (local development)
 if (import.meta.main) {
-  main();
+  main().catch((error) => {
+    console.error("Failed to start server:", error);
+    // In local development, we can exit
+    if (typeof Deno !== "undefined" && Deno.exit) {
+      Deno.exit(1);
+    }
+  });
 }
