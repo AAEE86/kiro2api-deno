@@ -113,9 +113,9 @@ async function handleStreamRequest(
         }
 
         const reader = response.body.getReader();
-        const decoder = new TextDecoder();
+        const encoder = new TextEncoder();
 
-        // Send initial event
+        // Send initial events
         const startEvent = {
           type: "message_start",
           message: {
@@ -125,56 +125,71 @@ async function handleStreamRequest(
             model: anthropicReq.model,
           },
         };
-        controller.enqueue(
-          new TextEncoder().encode(`data: ${JSON.stringify(startEvent)}\n\n`),
-        );
+        controller.enqueue(encoder.encode(`data: ${JSON.stringify(startEvent)}\n\n`));
 
-        // Process stream
+        const blockStartEvent = {
+          type: "content_block_start",
+          index: 0,
+          content_block: { type: "text", text: "" },
+        };
+        controller.enqueue(encoder.encode(`data: ${JSON.stringify(blockStartEvent)}\n\n`));
+
+        // Parse AWS EventStream binary format
+        let buffer = new Uint8Array(0);
+
         while (true) {
           const { done, value } = await reader.read();
           if (done) break;
 
-          const chunk = decoder.decode(value, { stream: true });
-          const lines = chunk.split("\n");
+          // Append to buffer
+          const newBuffer = new Uint8Array(buffer.length + value.length);
+          newBuffer.set(buffer);
+          newBuffer.set(value, buffer.length);
+          buffer = newBuffer;
 
-          for (const line of lines) {
-            if (!line.trim()) continue;
+          // Parse complete messages
+          while (buffer.length >= 16) {
+            const totalLength = new DataView(buffer.buffer, buffer.byteOffset, 4).getUint32(0, false);
+            
+            if (buffer.length < totalLength) break;
+
+            const headerLength = new DataView(buffer.buffer, buffer.byteOffset + 4, 4).getUint32(0, false);
+            const payloadStart = 12 + headerLength;
+            const payloadEnd = totalLength - 4;
+            const payloadData = buffer.slice(payloadStart, payloadEnd);
 
             try {
-              // Parse SSE event
-              if (line.startsWith("data:")) {
-                const jsonStr = line.substring(5).trim();
-                const event = JSON.parse(jsonStr);
-
-                // Convert CodeWhisperer event to Anthropic format
-                if (event.content) {
-                  const deltaEvent = {
-                    type: "content_block_delta",
-                    index: 0,
-                    delta: {
-                      type: "text_delta",
-                      text: event.content,
-                    },
-                  };
-                  controller.enqueue(
-                    new TextEncoder().encode(`data: ${JSON.stringify(deltaEvent)}\n\n`),
-                  );
-                }
+              const payload = JSON.parse(new TextDecoder().decode(payloadData));
+              if (payload.content) {
+                const deltaEvent = {
+                  type: "content_block_delta",
+                  index: 0,
+                  delta: { type: "text_delta", text: payload.content },
+                };
+                controller.enqueue(encoder.encode(`data: ${JSON.stringify(deltaEvent)}\n\n`));
               }
             } catch {
-              // Skip invalid events
+              // Skip invalid payload
             }
+
+            buffer = buffer.slice(totalLength);
           }
         }
 
-        // Send final event
+        // Send final events
+        const blockStopEvent = { type: "content_block_stop", index: 0 };
+        controller.enqueue(encoder.encode(`data: ${JSON.stringify(blockStopEvent)}\n\n`));
+
         const stopEvent = {
           type: "message_delta",
           delta: { stop_reason: "end_turn" },
+          usage: { output_tokens: 0 },
         };
-        controller.enqueue(
-          new TextEncoder().encode(`data: ${JSON.stringify(stopEvent)}\n\n`),
-        );
+        controller.enqueue(encoder.encode(`data: ${JSON.stringify(stopEvent)}\n\n`));
+
+        const messageStopEvent = { type: "message_stop" };
+        controller.enqueue(encoder.encode(`data: ${JSON.stringify(messageStopEvent)}\n\n`));
+
         controller.close();
       } catch (error) {
         controller.error(error);
