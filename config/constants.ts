@@ -21,8 +21,8 @@ export const DEFAULTS = {
   LOG_FORMAT: "json",
   MAX_TOKENS: 8192,
   AGENT_TASK_TYPE: "vibe",
-  CHAT_TRIGGER_TYPE: "manual",
-  ORIGIN: "vscode",
+  CHAT_TRIGGER_TYPE: "MANUAL",
+  ORIGIN: "AI_EDITOR",
 };
 
 // AWS constants
