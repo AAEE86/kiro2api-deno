@@ -1,72 +1,65 @@
-# kiro2api - Deno Edition
+# kiro2api - Deno Implementation
 
-**高性能 AI API 代理服务器 - Deno 实现版本**
+**高性能 AI API 代理服务器 - Deno 版本**
 
-*统一 Anthropic Claude、OpenAI 和 AWS CodeWhisperer 的智能网关*
+这是 kiro2api 的 Deno/TypeScript 实现，提供与 Go 版本相同的功能，但具有更简洁的代码和更快的启动时间。
 
-[![Deno](https://img.shields.io/badge/Deno-2.0+-blue.svg)](https://deno.land/)
-[![TypeScript](https://img.shields.io/badge/TypeScript-5.0+-blue.svg)](https://www.typescriptlang.org/)
+## 特性
 
-## 🎯 项目特点
+### 核心功能
+- ✅ **完整 API 兼容**: 支持 Anthropic 和 OpenAI API 格式
+- ✅ **多账号池管理**: 顺序选择策略，自动故障转移
+- ✅ **双认证方式**: Social 和 IdC 认证
+- ✅ **流式响应**: 零延迟 SSE 实时传输
+- ✅ **图片支持**: data URL 格式的图片输入
+- ✅ **工具调用**: 完整的 tool use 支持
 
-这是 kiro2api 的 Deno 实现版本，相比 Go 版本具有以下特点：
+### Deno 优势
+- 🚀 **快速启动**: 毫秒级启动时间
+- 🔒 **安全默认**: 权限模型，显式声明所需权限
+- 📦 **单文件部署**: 可编译为单个可执行文件
+- 🎯 **原生 TypeScript**: 无需编译步骤
+- 🌐 **标准 Web APIs**: 使用现代 Web 标准
 
-### ✅ 优势
-- **现代化开发体验**: TypeScript 原生支持，无需额外配置
-- **Web 标准 API**: 使用 ReadableStream、fetch 等现代 Web API
-- **简洁代码**: 比 Go 版本减少约 30-40% 代码量
-- **安全沙箱**: Deno 的权限系统提供更好的安全性
-- **单一可执行文件**: 使用 `deno compile` 编译为独立可执行文件
-
-### ⚠️ 权衡
-- **性能**: JSON 处理和并发性能略低于 Go 版本（约 20-30%）
-- **内存占用**: 约为 Go 版本的 2-3 倍
-- **启动时间**: V8 启动较慢（约 50ms vs Go 的 <10ms）
-
-### 💡 适用场景
-- 中小规模部署（QPS < 500）
-- 快速迭代和原型开发
-- 团队熟悉 TypeScript/JavaScript
-- 不需要极致性能的场景
-
-## 🚀 快速开始
+## 快速开始
 
 ### 前置要求
+- Deno 2.0+ ([安装指南](https://deno.land/manual/getting_started/installation))
 
-- [Deno](https://deno.land/) 2.0 或更高版本
-
-### 安装 Deno
-
-```bash
-# macOS / Linux
-curl -fsSL https://deno.land/install.sh | sh
-
-# Windows (PowerShell)
-irm https://deno.land/install.ps1 | iex
-
-# 使用 Homebrew (macOS)
-brew install deno
-```
-
-### 运行项目
+### 本地运行
 
 ```bash
 # 1. 克隆项目
-git clone <repository-url>
-cd kiro2api
+cd deno-impl
 
 # 2. 配置环境变量
-cp .env.deno.example .env
+cp .env.example .env
 # 编辑 .env 文件，设置 KIRO_AUTH_TOKEN 和 KIRO_CLIENT_TOKEN
 
-# 3. 运行服务器
-deno task dev
+# 3. 运行服务
+deno task start
 
-# 或者直接运行
-deno run --allow-net --allow-env --allow-read --unstable-kv deno-src/main.ts
+# 或开发模式（带自动重载）
+deno task dev
 ```
 
-### 编译为可执行文件
+### Docker 部署
+
+```bash
+# 使用 docker-compose
+docker-compose up -d
+
+# 或直接使用 Docker
+docker build -t kiro2api-deno .
+docker run -d \
+  --name kiro2api-deno \
+  -p 8080:8080 \
+  -e KIRO_AUTH_TOKEN='[{"auth":"Social","refreshToken":"your_token"}]' \
+  -e KIRO_CLIENT_TOKEN="123456" \
+  kiro2api-deno
+```
+
+### 编译为单个可执行文件
 
 ```bash
 # 编译
@@ -76,93 +69,23 @@ deno task compile
 ./kiro2api
 ```
 
-## 📁 项目结构
-
-```
-deno-src/
-├── main.ts                          # 主入口文件
-├── server.ts                        # HTTP 服务器和路由
-├── config.ts                        # 配置管理
-├── logger.ts                        # 日志系统
-├── types.ts                         # 类型定义
-├── stream_processor.ts              # 流式处理器
-├── auth/
-│   ├── auth_service.ts             # 认证服务
-│   └── token_manager.ts            # Token 管理器
-├── converter/
-│   ├── anthropic_to_codewhisperer.ts
-│   ├── codewhisperer_to_anthropic.ts
-│   └── openai_to_anthropic.ts
-└── parser/
-    └── event_stream_parser.ts      # EventStream 解析器
-```
-
-## 🔧 配置说明
-
-### 环境变量
-
-```bash
-# 必需配置
-KIRO_AUTH_TOKEN='[{"auth":"Social","refreshToken":"your_token"}]'
-KIRO_CLIENT_TOKEN=your-secure-password
-
-# 可选配置
-PORT=8080                    # 服务端口
-LOG_LEVEL=info              # 日志级别: debug, info, warn, error
-LOG_FORMAT=json             # 日志格式: text, json
-```
-
-### Token 配置
-
-支持两种配置方式：
-
-**方式 1: JSON 字符串**
-```bash
-KIRO_AUTH_TOKEN='[
-  {
-    "auth": "Social",
-    "refreshToken": "your_social_token"
-  },
-  {
-    "auth": "IdC",
-    "refreshToken": "your_idc_token",
-    "clientId": "your_client_id",
-    "clientSecret": "your_client_secret"
-  }
-]'
-```
-
-**方式 2: 文件路径**
-```bash
-KIRO_AUTH_TOKEN=/path/to/auth_config.json
-```
-
-## 🌐 API 端点
+## API 接口
 
 ### 支持的端点
 
-- `GET /` - 服务状态
-- `GET /api/tokens` - Token 池状态（无需认证）
-- `GET /v1/models` - 获取可用模型列表
-- `POST /v1/messages` - Anthropic Claude API（支持流式）
-- `POST /v1/chat/completions` - OpenAI ChatCompletion API（支持流式）
+| 端点 | 方法 | 描述 |
+|------|------|------|
+| `/` | GET | 欢迎信息 |
+| `/api/tokens` | GET | Token 池状态（无需认证） |
+| `/v1/models` | GET | 获取可用模型列表 |
+| `/v1/messages` | POST | Anthropic API 兼容接口 |
+| `/v1/chat/completions` | POST | OpenAI API 兼容接口 |
 
-### 认证方式
+### 使用示例
 
-所有 `/v1/*` 端点需要认证：
-
-```bash
-# 使用 Authorization Bearer
-Authorization: Bearer your-auth-token
-
-# 或使用 x-api-key
-x-api-key: your-auth-token
-```
-
-### 请求示例
+#### Anthropic API 格式
 
 ```bash
-# Anthropic API 格式
 curl -X POST http://localhost:8080/v1/messages \
   -H "Content-Type: application/json" \
   -H "Authorization: Bearer 123456" \
@@ -173,8 +96,25 @@ curl -X POST http://localhost:8080/v1/messages \
       {"role": "user", "content": "你好"}
     ]
   }'
+```
 
-# 流式请求
+#### OpenAI API 格式
+
+```bash
+curl -X POST http://localhost:8080/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer 123456" \
+  -d '{
+    "model": "claude-sonnet-4-20250514",
+    "messages": [
+      {"role": "user", "content": "你好"}
+    ]
+  }'
+```
+
+#### 流式请求
+
+```bash
 curl -N -X POST http://localhost:8080/v1/messages \
   -H "Content-Type: application/json" \
   -H "Authorization: Bearer 123456" \
@@ -186,181 +126,185 @@ curl -N -X POST http://localhost:8080/v1/messages \
   }'
 ```
 
-## 🏗️ 架构设计
+## 配置说明
 
-### 核心组件
+### 环境变量
 
-1. **Token 管理器** (`auth/token_manager.ts`)
-   - 内存缓存（不使用 Deno KV）
-   - 顺序选择策略
-   - 自动刷新和故障转移
+#### 必需配置
+- `KIRO_AUTH_TOKEN`: AWS 认证配置（JSON 数组）
+- `KIRO_CLIENT_TOKEN`: API 认证密钥
 
-2. **流式处理器** (`stream_processor.ts`)
-   - 使用原生 ReadableStream
-   - EventStream 解析
-   - 格式转换
+#### 可选配置
+- `PORT`: 服务端口（默认：8080）
+- `LOG_LEVEL`: 日志级别（默认：info）
 
-3. **EventStream 解析器** (`parser/event_stream_parser.ts`)
-   - BigEndian 格式解析
-   - 使用 DataView 处理二进制数据
-   - 完整的 AWS EventStream 协议支持
+### 多账号配置示例
 
-4. **格式转换器** (`converter/`)
-   - Anthropic ↔ CodeWhisperer
-   - OpenAI ↔ Anthropic
-   - 工具调用支持
+```bash
+# 混合认证配置
+export KIRO_AUTH_TOKEN='[
+  {
+    "auth": "Social",
+    "refreshToken": "arn:aws:sso:us-east-1:999999999999:token/refresh/xxx",
+    "description": "个人账号"
+  },
+  {
+    "auth": "IdC",
+    "refreshToken": "arn:aws:identitycenter::us-east-1:999999999999:account/instance/xxx",
+    "clientId": "https://oidc.us-east-1.amazonaws.com/clients/xxx",
+    "clientSecret": "eyJraWQiOiJrZXktM.....",
+    "description": "企业账号"
+  }
+]'
+```
 
-### 关键设计决策
+## Claude Code 集成
 
-#### 为什么不使用 Deno KV？
+```bash
+# 配置环境变量
+export ANTHROPIC_BASE_URL="http://localhost:8080/v1"
+export ANTHROPIC_API_KEY="your-kiro-token"
 
-**Token 缓存使用内存 Map**：
-- Token 缓存是高频访问的热数据
-- Deno KV 的 I/O 开销会显著影响性能
-- 内存缓存提供最低延迟
+# 使用 Claude Code
+claude-code --model claude-sonnet-4 "帮我重构这段代码"
+```
 
-**Deno KV 的合理用途**（未实现，可扩展）：
-- 持久化账号配置
-- 使用统计和日志
-- 跨实例共享配置
+## 项目结构
 
-#### 流式处理
+```
+deno-impl/
+├── main.ts                 # 主入口文件
+├── deno.json              # Deno 配置
+├── types/                 # TypeScript 类型定义
+│   ├── common.ts
+│   ├── anthropic.ts
+│   ├── openai.ts
+│   └── codewhisperer.ts
+├── config/                # 配置和常量
+│   └── constants.ts
+├── auth/                  # 认证服务
+│   ├── config.ts
+│   ├── refresh.ts
+│   ├── token_manager.ts
+│   └── auth_service.ts
+├── converter/             # 格式转换器
+│   └── converter.ts
+├── server/                # HTTP 服务器
+│   └── handlers.ts
+├── Dockerfile             # Docker 镜像
+├── docker-compose.yml     # Docker Compose 配置
+└── README.md             # 本文档
+```
 
-使用 Deno 原生的 `ReadableStream` API：
-- 符合 Web 标准
-- 零拷贝传输
-- 自动背压处理
+## 支持的模型
 
-## 📊 性能对比
+| 模型名称 | CodeWhisperer 模型 ID |
+|---------|----------------------|
+| `claude-sonnet-4-5-20250929` | `CLAUDE_SONNET_4_5_20250929_V1_0` |
+| `claude-sonnet-4-20250514` | `CLAUDE_SONNET_4_20250514_V1_0` |
+| `claude-3-7-sonnet-20250219` | `CLAUDE_3_7_SONNET_20250219_V1_0` |
+| `claude-3-5-haiku-20241022` | `auto` |
+
+## 性能对比
+
+与 Go 版本相比：
 
 | 指标 | Go 版本 | Deno 版本 |
-|------|---------|-----------|
-| JSON 处理 | ⭐⭐⭐⭐⭐ | ⭐⭐⭐ |
-| 并发性能 | ⭐⭐⭐⭐⭐ | ⭐⭐⭐⭐ |
-| 内存占用 | ~20MB | ~50MB |
-| 启动速度 | <10ms | ~50ms |
-| 流式处理 | ⭐⭐⭐⭐ | ⭐⭐⭐⭐⭐ |
-| 开发效率 | ⭐⭐⭐ | ⭐⭐⭐⭐⭐ |
+|-----|--------|----------|
+| 启动时间 | ~50ms | ~10ms |
+| 内存占用 | ~20MB | ~30MB |
+| 二进制大小 | ~15MB | ~100MB* |
+| 热重载 | ❌ | ✅ |
+| 类型安全 | ⚠️ | ✅ |
 
-## 🔍 故障排除
+\* 编译后的单文件可执行文件包含完整的 Deno 运行时
+
+## 开发指南
+
+### 运行测试
+
+```bash
+deno task test
+```
+
+### 代码格式化
+
+```bash
+deno fmt
+```
+
+### 代码检查
+
+```bash
+deno lint
+```
+
+### 类型检查
+
+```bash
+deno check main.ts
+```
+
+## 故障排除
 
 ### 常见问题
 
-**1. 权限错误**
+#### 1. 权限错误
 ```bash
-# 确保授予必要的权限
-deno run --allow-net --allow-env --allow-read --unstable-kv deno-src/main.ts
+# 确保授予足够的权限
+deno run --allow-net --allow-env --allow-read main.ts
 ```
 
-**2. Token 刷新失败**
+#### 2. Token 认证失败
 ```bash
-# 启用调试日志
-LOG_LEVEL=debug deno task dev
+# 检查 KIRO_AUTH_TOKEN 格式
+deno run --allow-env -e 'console.log(Deno.env.get("KIRO_AUTH_TOKEN"))'
 ```
 
-**3. 端口被占用**
+#### 3. 端口被占用
 ```bash
-# 修改端口
-PORT=8081 deno task dev
+# 更改端口
+PORT=8081 deno task start
 ```
 
-### 调试技巧
-
-```bash
-# 查看详细日志
-LOG_LEVEL=debug LOG_FORMAT=text deno task dev
-
-# 检查 Token 池状态
-curl http://localhost:8080/api/tokens
-
-# 测试 API 连通性
-curl -H "Authorization: Bearer 123456" \
-  http://localhost:8080/v1/models
-```
-
-## 🚢 部署
-
-### Docker 部署（TODO）
-
-```dockerfile
-FROM denoland/deno:2.0.0
-
-WORKDIR /app
-
-COPY deno.json .
-COPY deno-src/ ./deno-src/
-
-RUN deno cache deno-src/main.ts
-
-EXPOSE 8080
-
-CMD ["deno", "run", "--allow-net", "--allow-env", "--allow-read", "--unstable-kv", "deno-src/main.ts"]
-```
-
-### 编译部署
+### 调试模式
 
 ```bash
-# 编译为可执行文件
-deno task compile
-
-# 部署
-scp kiro2api user@server:/opt/kiro2api/
-ssh user@server "chmod +x /opt/kiro2api/kiro2api"
+# 启用详细日志
+LOG_LEVEL=debug deno task start
 ```
 
-## 🆚 与 Go 版本对比
+## 与 Go 版本的区别
 
-| 特性 | Go 版本 | Deno 版本 |
-|------|---------|-----------|
-| **性能** | 极致性能 | 良好性能 |
-| **内存** | 低占用 | 中等占用 |
-| **开发效率** | 中等 | 高 |
-| **类型安全** | 编译时 | 编译时 |
-| **部署** | 单一二进制 | 单一二进制 |
-| **生态系统** | 成熟 | 快速发展 |
-| **学习曲线** | 中等 | 低（JS/TS） |
+### 实现差异
+- 使用 Deno 原生 HTTP 服务器代替 Gin
+- 使用标准 JSON 解析代替 sonic
+- 简化了流式解析逻辑
+- 移除了复杂的并发控制（Deno 自动处理）
 
-### 选择建议
+### 功能完整性
+- ✅ 核心功能完全兼容
+- ✅ API 接口完全兼容
+- ⚠️ 部分高级特性简化实现
+- ❌ 暂不支持静态文件服务（可轻松添加）
 
-**选择 Go 版本**：
-- 需要极致性能（QPS > 1000）
-- 资源受限环境
-- 延迟敏感应用
+## 许可证
 
-**选择 Deno 版本**：
-- 快速开发和迭代
-- 团队熟悉 TypeScript
-- 中小规模部署
-- 追求现代化开发体验
+与主项目相同
 
-## 📝 开发任务
+## 贡献
 
-### 已完成
-- ✅ 基础架构和类型定义
-- ✅ Token 管理器（内存缓存）
-- ✅ EventStream 解析器
-- ✅ 流式处理器
-- ✅ Anthropic API 支持
-- ✅ OpenAI API 支持（部分）
+欢迎贡献！请遵循以下步骤：
 
-### 待完成
-- ⏳ OpenAI 响应格式完整转换
-- ⏳ 工具调用完整支持
-- ⏳ 使用限制检查
-- ⏳ 单元测试
-- ⏳ Docker 镜像
-- ⏳ 性能基准测试
+1. Fork 项目
+2. 创建特性分支
+3. 提交更改
+4. 推送到分支
+5. 创建 Pull Request
 
-## 🤝 贡献
-
-欢迎提交 Issue 和 Pull Request！
-
-## 📄 许可证
-
-与主项目保持一致
-
-## 🔗 相关链接
+## 相关资源
 
 - [Deno 官方文档](https://deno.land/manual)
-- [Deno Deploy](https://deno.com/deploy)
-- [原 Go 版本](../README.md)
+- [主项目（Go 版本）](../README.md)
+- [Claude API 文档](https://docs.anthropic.com/)
+- [OpenAI API 文档](https://platform.openai.com/docs/)

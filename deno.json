@@ -1,21 +1,23 @@
 {
-  "name": "@kiro2api/deno",
-  "version": "1.0.0",
-  "exports": "./deploy.ts",
   "tasks": {
-    "dev": "deno run --allow-net --allow-env --allow-read main.ts",
     "start": "deno run --allow-net --allow-env --allow-read main.ts",
-    "compile": "deno compile --allow-net --allow-env --allow-read --output kiro2api main.ts",
-    "test": "deno test --allow-net --allow-env --allow-read"
+    "dev": "deno run --allow-net --allow-env --allow-read --watch main.ts",
+    "test": "deno test --allow-net --allow-env",
+    "compile": "deno compile --allow-net --allow-env --allow-read --output kiro2api main.ts"
   },
-  "imports": {
-    "@std/assert": "jsr:@std/assert@^1",
-    "@std/http": "jsr:@std/http@^1",
-    "@std/log": "jsr:@std/log@^0.224",
-    "@std/dotenv": "jsr:@std/dotenv@^0.225"
+  "fmt": {
+    "useTabs": false,
+    "lineWidth": 100,
+    "indentWidth": 2,
+    "semiColons": true
+  },
+  "lint": {
+    "rules": {
+      "tags": ["recommended"]
+    }
   },
   "compilerOptions": {
-    "strict": true,
-    "lib": ["deno.window"]
+    "lib": ["deno.window", "deno.unstable"],
+    "strict": true
   }
 }
