@@ -188,13 +188,11 @@ async function main() {
 // Export handler for Deno Deploy
 export default { fetch: handleRequestWithInit };
 
-// Run the server if executed directly (local development)
+// Run the server if executed directly (local development only)
 if (import.meta.main) {
   main().catch((error) => {
     console.error("Failed to start server:", error);
-    // In local development, we can exit
-    if (typeof Deno !== "undefined" && Deno.exit) {
-      Deno.exit(1);
-    }
+    // Let the error propagate naturally
+    // Do not call Deno.exit() as it's not allowed in cloud environments
   });
 }
