@@ -1,0 +1,18 @@
+{
+  "version": "3",
+  "packages": {
+    "specifiers": {
+      "jsr:@std/dotenv@^0.225": "jsr:@std/dotenv@0.225.5",
+      "jsr:@std/log@^0.224": "jsr:@std/log@0.224.14"
+    },
+    "jsr": {
+      "@std/dotenv@0.225.5": {
+        "integrity": "sha256-example"
+      },
+      "@std/log@0.224.14": {
+        "integrity": "sha256-example"
+      }
+    }
+  },
+  "remote": {}
+}

@@ -1,15 +1,30 @@
 /**
  * kiro2api - Deno Edition
- * 快速启动入口（项目根目录）
+ * 部署入口文件
  */
 
-// 重新导出 deno-src/main.ts
-export * from "./deno-src/main.ts";
+import { loadConfig } from "./deno-src/config.ts";
+import { initLogger, info, error } from "./deno-src/logger.ts";
+import { createAuthService } from "./deno-src/auth/auth_service.ts";
+import { startServer } from "./deno-src/server.ts";
 
-// 如果直接运行此文件，则导入并执行主函数
-if (import.meta.main) {
-  const { default: main } = await import("./deno-src/main.ts");
-  if (main) {
-    await main();
+async function main() {
+  try {
+    const config = await loadConfig();
+    initLogger(config.logLevel, config.logFormat);
+    
+    info("kiro2api - Deno Edition 启动中...");
+    
+    const authService = await createAuthService(config.authConfigs);
+    await startServer(config, authService);
+  } catch (err) {
+    error("启动失败", {
+      error: err instanceof Error ? err.message : String(err)
+    });
+    Deno.exit(1);
   }
+}
+
+if (import.meta.main) {
+  main();
 }
