@@ -4,6 +4,9 @@ import type { TokenInfo } from "../types/common.ts";
 import { AuthService } from "../auth/auth_service.ts";
 import { anthropicToCodeWhisperer, generateId, openAIToAnthropic } from "../converter/converter.ts";
 import { AWS_ENDPOINTS, MODEL_MAP } from "../config/constants.ts";
+import { CompliantEventStreamParser } from "../parser/stream_parser.ts";
+import { ToolLifecycleManager } from "../parser/tool_manager.ts";
+import { SessionManager } from "../utils/session.ts";
 
 // Handle /v1/models endpoint
 export async function handleModels(): Promise<Response> {
@@ -25,7 +28,7 @@ export async function handleModels(): Promise<Response> {
 
 // Handle /api/tokens endpoint
 export async function handleTokenStatus(authService: AuthService): Promise<Response> {
-  const status = authService.getTokenPoolStatus();
+  const status = await authService.getDetailedTokenPoolStatus();
   return Response.json(status);
 }
 
@@ -46,9 +49,9 @@ export async function handleMessages(
     const tokenInfo = await authService.getToken();
 
     if (anthropicReq.stream) {
-      return await handleStreamRequest(anthropicReq, tokenInfo);
+      return await handleStreamRequest(anthropicReq, tokenInfo, req);
     } else {
-      return await handleNonStreamRequest(anthropicReq, tokenInfo);
+      return await handleNonStreamRequest(anthropicReq, tokenInfo, req);
     }
   } catch (error) {
     console.error("Error handling messages:", error);
@@ -74,9 +77,9 @@ export async function handleChatCompletions(
     const tokenInfo = await authService.getToken();
 
     if (anthropicReq.stream) {
-      return await handleStreamRequest(anthropicReq, tokenInfo);
+      return await handleStreamRequest(anthropicReq, tokenInfo, req);
     } else {
-      return await handleNonStreamRequest(anthropicReq, tokenInfo);
+      return await handleNonStreamRequest(anthropicReq, tokenInfo, req);
     }
   } catch (error) {
     console.error("Error handling chat completions:", error);
@@ -91,9 +94,14 @@ export async function handleChatCompletions(
 async function handleStreamRequest(
   anthropicReq: AnthropicRequest,
   tokenInfo: TokenInfo,
+  req?: Request,
 ): Promise<Response> {
-  const conversationId = crypto.randomUUID();
+  const clientInfo = req ? SessionManager.extractClientInfo(req) : {};
+  const conversationId = SessionManager.generateStableConversationId(clientInfo);
   const cwReq = anthropicToCodeWhisperer(anthropicReq, conversationId);
+  
+  const parser = new CompliantEventStreamParser();
+  const toolManager = new ToolLifecycleManager();
 
   // Create readable stream
   const stream = new ReadableStream({
@@ -134,45 +142,35 @@ async function handleStreamRequest(
         };
         controller.enqueue(encoder.encode(`data: ${JSON.stringify(blockStartEvent)}\n\n`));
 
-        // Parse AWS EventStream binary format
-        let buffer = new Uint8Array(0);
-
+        // Parse AWS EventStream using enhanced parser
         while (true) {
           const { done, value } = await reader.read();
           if (done) break;
 
-          // Append to buffer
-          const newBuffer = new Uint8Array(buffer.length + value.length);
-          newBuffer.set(buffer);
-          newBuffer.set(value, buffer.length);
-          buffer = newBuffer;
-
-          // Parse complete messages
-          while (buffer.length >= 16) {
-            const totalLength = new DataView(buffer.buffer, buffer.byteOffset, 4).getUint32(0, false);
-            
-            if (buffer.length < totalLength) break;
-
-            const headerLength = new DataView(buffer.buffer, buffer.byteOffset + 4, 4).getUint32(0, false);
-            const payloadStart = 12 + headerLength;
-            const payloadEnd = totalLength - 4;
-            const payloadData = buffer.slice(payloadStart, payloadEnd);
-
-            try {
-              const payload = JSON.parse(new TextDecoder().decode(payloadData));
-              if (payload.content) {
-                const deltaEvent = {
-                  type: "content_block_delta",
-                  index: 0,
-                  delta: { type: "text_delta", text: payload.content },
-                };
-                controller.enqueue(encoder.encode(`data: ${JSON.stringify(deltaEvent)}\n\n`));
-              }
-            } catch {
-              // Skip invalid payload
+          const events = parser.parseStream(value);
+          
+          for (const event of events) {
+            if (event.type === "content" && event.data.content) {
+              const deltaEvent = {
+                type: "content_block_delta",
+                index: 0,
+                delta: { type: "text_delta", text: event.data.content },
+              };
+              controller.enqueue(encoder.encode(`data: ${JSON.stringify(deltaEvent)}\n\n`));
+            } else if (event.type === "tool_use") {
+              toolManager.startTool(event.data.toolUse.toolUseId, event.data.toolUse.name, event.data.toolUse.input);
+              const toolEvent = {
+                type: "content_block_start",
+                index: 1,
+                content_block: {
+                  type: "tool_use",
+                  id: event.data.toolUse.toolUseId,
+                  name: event.data.toolUse.name,
+                  input: event.data.toolUse.input,
+                },
+              };
+              controller.enqueue(encoder.encode(`data: ${JSON.stringify(toolEvent)}\n\n`));
             }
-
-            buffer = buffer.slice(totalLength);
           }
         }
 
@@ -210,9 +208,13 @@ async function handleStreamRequest(
 async function handleNonStreamRequest(
   anthropicReq: AnthropicRequest,
   tokenInfo: TokenInfo,
+  req?: Request,
 ): Promise<Response> {
-  const conversationId = crypto.randomUUID();
+  const clientInfo = req ? SessionManager.extractClientInfo(req) : {};
+  const conversationId = SessionManager.generateStableConversationId(clientInfo);
   const cwReq = anthropicToCodeWhisperer(anthropicReq, conversationId);
+  
+  const parser = new CompliantEventStreamParser();
 
   console.log("Sending request to CodeWhisperer:", JSON.stringify(cwReq, null, 2));
 
@@ -236,55 +238,40 @@ async function handleNonStreamRequest(
   const data = new Uint8Array(responseBuffer);
   console.log("CodeWhisperer response size:", data.length);
 
-  // Parse AWS EventStream binary format
-  let content = "";
-  let offset = 0;
-
-  while (offset < data.length) {
-    if (offset + 16 > data.length) break;
-
-    // Read message length (4 bytes, big-endian)
-    const totalLength = new DataView(data.buffer, offset, 4).getUint32(0, false);
-    const headerLength = new DataView(data.buffer, offset + 4, 4).getUint32(0, false);
-
-    if (offset + totalLength > data.length) break;
-
-    // Extract payload
-    const payloadStart = offset + 12 + headerLength;
-    const payloadEnd = offset + totalLength - 4;
-    const payloadData = data.slice(payloadStart, payloadEnd);
-
-    try {
-      const payload = JSON.parse(new TextDecoder().decode(payloadData));
-      if (payload.content) {
-        content += payload.content;
-      }
-    } catch {
-      // Skip invalid payload
-    }
-
-    offset += totalLength;
-  }
-
-  console.log("Extracted content:", content);
+  // Parse AWS EventStream using enhanced parser
+  parser.parseStream(data);
+  const result = parser.getResult();
+  
+  console.log("Extracted content:", result.content);
+  console.log("Tool calls:", result.toolCalls);
 
   // Convert response to Anthropic format
+  const content: any[] = [];
+  
+  if (result.content) {
+    content.push({
+      type: "text",
+      text: result.content,
+    });
+  }
+  
+  for (const tool of result.toolCalls) {
+    content.push({
+      type: "tool_use",
+      id: tool.id,
+      name: tool.name,
+      input: tool.input,
+    });
+  }
+  
   const anthropicResponse = {
     id: generateId("msg"),
     type: "message",
     role: "assistant",
     model: anthropicReq.model,
-    content: [
-      {
-        type: "text",
-        text: content,
-      },
-    ],
-    stop_reason: "end_turn",
-    usage: {
-      input_tokens: 0,
-      output_tokens: Math.max(1, Math.ceil(content.length / 4)),
-    },
+    content,
+    stop_reason: result.stopReason,
+    usage: result.usage,
   };
 
   return Response.json(anthropicResponse);

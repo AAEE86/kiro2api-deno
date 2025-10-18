@@ -67,3 +67,20 @@ export interface ModelsResponse {
   object: string;
   data: Model[];
 }
+
+export interface UsageLimits {
+  totalLimit: number;
+  currentUsage: number;
+  remainingUsage: number;
+  isExceeded: boolean;
+  resetDate: Date | null;
+}
+
+export interface ToolExecution {
+  id: string;
+  name: string;
+  input: any;
+  output?: any;
+  status: "running" | "completed" | "error";
+  error?: string;
+}

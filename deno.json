@@ -3,6 +3,7 @@
     "start": "deno run --allow-net --allow-env --allow-read main.ts",
     "dev": "deno run --allow-net --allow-env --allow-read --watch main.ts",
     "test": "deno test --allow-net --allow-env",
+    "test-features": "deno run --allow-net --allow-env --allow-read test_enhanced_features.ts",
     "compile": "deno compile --allow-net --allow-env --allow-read --output kiro2api main.ts"
   },
   "fmt": {
