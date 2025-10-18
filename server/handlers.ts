@@ -102,8 +102,7 @@ async function handleStreamRequest(
         const response = await fetch(AWS_ENDPOINTS.CODEWHISPERER, {
           method: "POST",
           headers: {
-            "Content-Type": "application/x-amz-json-1.1",
-            "X-Amz-Target": "AWSCognitoIdentityProviderService.SendMessage",
+            "Content-Type": "application/json",
             "Authorization": `Bearer ${tokenInfo.accessToken}`,
           },
           body: JSON.stringify(cwReq),
@@ -205,8 +204,7 @@ async function handleNonStreamRequest(
   const response = await fetch(AWS_ENDPOINTS.CODEWHISPERER, {
     method: "POST",
     headers: {
-      "Content-Type": "application/x-amz-json-1.1",
-      "X-Amz-Target": "AWSCognitoIdentityProviderService.SendMessage",
+      "Content-Type": "application/json",
       "Authorization": `Bearer ${tokenInfo.accessToken}`,
     },
     body: JSON.stringify(cwReq),
