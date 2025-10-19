@@ -3,6 +3,7 @@ import type { OpenAIRequest } from "../types/openai.ts";
 import type { CodeWhispererRequest } from "../types/codewhisperer.ts";
 import type { ContentBlock } from "../types/common.ts";
 import { DEFAULTS, MODEL_MAP } from "../config/constants.ts";
+import * as logger from "../logger/logger.ts";
 
 // Validate CodeWhisperer request structure
 // Match Go implementation in converter/codewhisperer.go:47-87
@@ -19,17 +20,20 @@ function validateCodeWhispererRequest(cwReq: CodeWhispererRequest): void {
   // Validate content completeness
   const trimmedContent = cwReq.conversationState.currentMessage.userInputMessage.content.trim();
   const hasImages = cwReq.conversationState.currentMessage.userInputMessage.images.length > 0;
-  const hasTools = cwReq.conversationState.currentMessage.userInputMessage.userInputMessageContext
-    .tools?.length > 0;
-  const hasToolResults = cwReq.conversationState.currentMessage.userInputMessage
-    .userInputMessageContext.toolResults?.length > 0;
+  const hasTools = (cwReq.conversationState.currentMessage.userInputMessage.userInputMessageContext
+    .tools?.length || 0) > 0;
+  const hasToolResults = (cwReq.conversationState.currentMessage.userInputMessage
+    .userInputMessageContext.toolResults?.length || 0) > 0;
 
   // If has tool results, allow empty content (tool execution feedback)
   if (hasToolResults) {
-    console.log(
-      "Tool results detected, allowing empty content:",
-      cwReq.conversationState.currentMessage.userInputMessage.userInputMessageContext.toolResults
-        ?.length,
+    logger.debug(
+      "检测到工具结果，允许空内容",
+      logger.Int(
+        "tool_result_count",
+        cwReq.conversationState.currentMessage.userInputMessage.userInputMessageContext.toolResults
+          ?.length || 0,
+      ),
     );
     return;
   }
@@ -37,7 +41,7 @@ function validateCodeWhispererRequest(cwReq: CodeWhispererRequest): void {
   // If no content but has tools, inject placeholder
   if (!trimmedContent && !hasImages && hasTools) {
     cwReq.conversationState.currentMessage.userInputMessage.content = "执行工具任务";
-    console.warn("Injected placeholder content to trigger tool call");
+    logger.warn("注入占位符内容以触发工具调用");
     return;
   }
 
@@ -163,15 +167,16 @@ export function anthropicToCodeWhisperer(
         });
       } else {
         // Orphaned assistant message - warn and skip
-        console.warn(`Orphaned assistant message at index ${i}, skipping`);
+        logger.warn("孤立的助手消息，跳过", logger.Int("index", i));
       }
     }
   }
 
   // Handle orphaned user messages at the end
   if (userMessagesBuffer.length > 0) {
-    console.warn(
-      `Orphaned user messages at end of history (${userMessagesBuffer.length}), auto-pairing with OK response`,
+    logger.warn(
+      "历史末尾的孤立用户消息，自动配对响应",
+      logger.Int("message_count", userMessagesBuffer.length),
     );
 
     const contentParts: string[] = [];
@@ -336,7 +341,7 @@ function extractToolResults(content: unknown) {
       if (block.type === "tool_result") {
         // Validate required fields
         if (!block.tool_use_id) {
-          console.warn("tool_result missing tool_use_id, skipping");
+          logger.warn("tool_result 缺少 tool_use_id，跳过");
           continue;
         }
 
@@ -393,7 +398,7 @@ function extractToolUses(content: unknown) {
       if (block.type === "tool_use") {
         // Validate required fields first
         if (!block.id || !block.name) {
-          console.warn("tool_use missing id or name, skipping:", block);
+          logger.warn("tool_use 缺少 id 或 name，跳过", logger.Any("block", block));
           continue;
         }
 

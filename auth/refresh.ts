@@ -1,6 +1,7 @@
 import type { AuthConfig } from "./config.ts";
 import type { RefreshResponse, TokenInfo } from "../types/common.ts";
 import { AWS_ENDPOINTS } from "../config/constants.ts";
+import * as logger from "../logger/logger.ts";
 
 // Refresh Social authentication token
 async function refreshSocialToken(config: AuthConfig): Promise<TokenInfo> {
@@ -73,7 +74,7 @@ export async function refreshToken(config: AuthConfig): Promise<TokenInfo> {
       throw new Error(`Unknown auth type: ${config.auth}`);
     }
   } catch (error) {
-    console.error(`Token refresh failed for ${config.auth}:`, error);
+    logger.error("Token 刷新失败", logger.String("auth_type", config.auth), logger.Err(error));
     throw error;
   }
 }

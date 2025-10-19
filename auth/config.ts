@@ -61,6 +61,7 @@ function parseAuthConfigs(jsonString: string): AuthConfig[] {
 
     return enabledConfigs;
   } catch (error) {
-    throw new Error(`Failed to parse auth configs: ${error.message}`);
+    const message = error instanceof Error ? error.message : String(error);
+    throw new Error(`Failed to parse auth configs: ${message}`);
   }
 }

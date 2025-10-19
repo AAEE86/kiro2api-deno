@@ -6,6 +6,8 @@ import {
   handleTokenStatus,
 } from "./server/handlers.ts";
 import { DEFAULTS } from "./config/constants.ts";
+import * as logger from "./logger/logger.ts";
+import { join } from "https://deno.land/std@0.208.0/path/mod.ts";
 
 // Middleware to check authorization
 function checkAuth(req: Request, clientToken: string): boolean {
@@ -27,6 +29,48 @@ function checkAuth(req: Request, clientToken: string): boolean {
   }
 
   return false;
+}
+
+// Serve static files
+async function serveStaticFile(pathname: string): Promise<Response> {
+  try {
+    // Remove leading slash and "static/" prefix if present
+    let filePath = pathname.startsWith("/static/") 
+      ? pathname.substring("/static/".length)
+      : pathname.substring(1);
+    
+    const fullPath = join(Deno.cwd(), "static", filePath);
+    
+    const file = await Deno.readFile(fullPath);
+    
+    // Determine content type based on file extension
+    const ext = filePath.split(".").pop()?.toLowerCase();
+    const contentTypes: Record<string, string> = {
+      "html": "text/html; charset=utf-8",
+      "css": "text/css; charset=utf-8",
+      "js": "application/javascript; charset=utf-8",
+      "json": "application/json",
+      "png": "image/png",
+      "jpg": "image/jpeg",
+      "jpeg": "image/jpeg",
+      "gif": "image/gif",
+      "svg": "image/svg+xml",
+      "ico": "image/x-icon",
+    };
+    
+    const contentType = contentTypes[ext || ""] || "application/octet-stream";
+    
+    return new Response(file, {
+      status: 200,
+      headers: {
+        "Content-Type": contentType,
+        "Cache-Control": "public, max-age=3600",
+      },
+    });
+  } catch (error) {
+    logger.debug("Static file not found", logger.String("path", pathname));
+    return new Response("Not Found", { status: 404 });
+  }
 }
 
 // Main request handler
@@ -70,9 +114,11 @@ async function handleRequest(
     } else if (url.pathname === "/v1/chat/completions" && req.method === "POST") {
       response = await handleChatCompletions(req, authService);
     } else if (url.pathname === "/" && req.method === "GET") {
-      response = new Response("kiro2api Deno - AI API Gateway\n", {
-        headers: { "Content-Type": "text/plain" },
-      });
+      // Serve the dashboard index page
+      response = await serveStaticFile("/index.html");
+    } else if (url.pathname.startsWith("/static/") && req.method === "GET") {
+      // Serve static files (CSS, JS, images, etc.)
+      response = await serveStaticFile(url.pathname);
     } else {
       response = new Response("Not Found", { status: 404 });
     }
@@ -89,7 +135,7 @@ async function handleRequest(
       headers,
     });
   } catch (error) {
-    console.error("Error handling request:", error);
+    logger.error("请求处理失败", logger.Err(error));
     return new Response(JSON.stringify({ error: "Internal Server Error" }), {
       status: 500,
       headers: { ...corsHeaders, "Content-Type": "application/json" },
@@ -99,7 +145,7 @@ async function handleRequest(
 
 // Global variables for cloud deployment
 let globalAuthService: AuthService | null = null;
-let globalClientToken: string | null = null;
+let globalClientToken: string | null | undefined = null;
 
 // Initialize function (called once on startup)
 async function initialize() {
@@ -113,24 +159,28 @@ async function initialize() {
         Deno.env.set(key.trim(), value.trim());
       }
     });
-    console.log("Loaded .env file");
+    logger.info("已加载 .env 文件");
   } catch {
-    // .env file not found, using environment variables
+    logger.info("未找到 .env 文件，使用环境变量");
   }
+
+  // Reinitialize logger after loading env vars
+  logger.reinitialize();
 
   // Get configuration
   globalClientToken = Deno.env.get("KIRO_CLIENT_TOKEN");
 
   if (!globalClientToken) {
+    logger.fatal("致命错误: 未设置 KIRO_CLIENT_TOKEN 环境变量");
     throw new Error(
       "KIRO_CLIENT_TOKEN environment variable not set. Please configure it in your deployment settings.",
     );
   }
 
   // Create AuthService
-  console.log("Initializing AuthService...");
+  logger.info("正在创建 AuthService...");
   globalAuthService = await AuthService.create();
-  console.log("AuthService initialized successfully");
+  logger.info("AuthService 初始化成功");
 }
 
 // Request handler wrapper with lazy initialization
@@ -143,11 +193,11 @@ async function handleRequestWithInit(req: Request): Promise<Response> {
 
     return await handleRequest(req, globalAuthService!, globalClientToken!);
   } catch (error) {
-    console.error("Request handling error:", error);
+    logger.error("请求处理错误", logger.Err(error));
     return new Response(
       JSON.stringify({
         error: "Service initialization failed",
-        message: error.message,
+        message: error instanceof Error ? error.message : String(error),
       }),
       {
         status: 503,
@@ -163,7 +213,7 @@ const isDenoDeployment = Deno.env.get("DENO_DEPLOYMENT_ID") !== undefined;
 // Main function for local development only
 async function main() {
   if (isDenoDeployment) {
-    console.log("Running in Deno Deploy, skipping local server setup");
+    logger.info("在 Deno Deploy 环境中运行，跳过本地服务器设置");
     return;
   }
 
@@ -172,23 +222,36 @@ async function main() {
   try {
     await initialize();
 
-    console.log(`Starting server on port ${port}...`);
+    logger.debug(
+      "日志系统初始化完成",
+      logger.String("config_level", Deno.env.get("LOG_LEVEL") || "info"),
+      logger.String("config_file", Deno.env.get("LOG_FILE") || "none"),
+    );
+
+    logger.info(`正在启动服务器...`, logger.Int("port", port));
 
     Deno.serve({
       port,
       onListen: ({ hostname, port }) => {
-        console.log(`\n🚀 kiro2api (Deno) listening on http://${hostname}:${port}`);
-        console.log(`\nAvailable endpoints:`);
-        console.log(`  GET  /                        - Welcome message`);
-        console.log(`  GET  /api/tokens              - Token pool status`);
-        console.log(`  GET  /v1/models               - List available models`);
-        console.log(`  POST /v1/messages             - Anthropic API endpoint`);
-        console.log(`  POST /v1/chat/completions     - OpenAI API endpoint`);
-        console.log(`\nPress Ctrl+C to stop\n`);
+        logger.info(
+          `启动 Anthropic API 代理服务器`,
+          logger.String("port", String(port)),
+          logger.String("auth_token", "***"),
+        );
+        logger.info("AuthToken 验证已启用");
+        logger.info("可用端点:");
+        logger.info("  GET  /                        - Web 管理界面");
+        logger.info("  GET  /api/tokens              - Token 池状态 (API)");
+        logger.info("  GET  /v1/models               - 模型列表");
+        logger.info("  POST /v1/messages             - Anthropic API 代理");
+        logger.info("  POST /v1/chat/completions     - OpenAI API 代理");
+        logger.info("按 Ctrl+C 停止服务器");
+        logger.info(`\n🚀 kiro2api (Deno) listening on http://${hostname}:${port}\n`);
+        logger.info(`📊 Web Dashboard: http://${hostname}:${port}\n`);
       },
     }, handleRequestWithInit);
   } catch (error) {
-    console.error("Fatal error:", error);
+    logger.fatal("启动服务器失败", logger.Err(error));
     throw error;
   }
 }
@@ -199,6 +262,6 @@ export default { fetch: handleRequestWithInit };
 // Run the server if executed directly and not in Deno Deploy
 if (import.meta.main && !isDenoDeployment) {
   main().catch((error) => {
-    console.error("Failed to start server:", error);
+    logger.fatal("服务器启动失败", logger.Err(error));
   });
 }

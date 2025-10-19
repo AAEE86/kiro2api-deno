@@ -6,6 +6,7 @@ import { anthropicToCodeWhisperer, generateId, openAIToAnthropic } from "../conv
 import { AWS_ENDPOINTS, MODEL_MAP } from "../config/constants.ts";
 import { CompliantEventStreamParser } from "../parser/compliant_event_stream_parser.ts";
 import { ToolLifecycleManager } from "../parser/tool_lifecycle_manager.ts";
+import * as logger from "../logger/logger.ts";
 // Handle /v1/models endpoint
 export async function handleModels(): Promise<Response> {
   const models = Object.keys(MODEL_MAP).map((id) => ({
@@ -26,7 +27,7 @@ export async function handleModels(): Promise<Response> {
 
 // Handle /api/tokens endpoint
 export async function handleTokenStatus(authService: AuthService): Promise<Response> {
-  const status = authService.getTokenPoolStatus();
+  const status = await authService.getTokenPoolStatus();
   return Response.json(status);
 }
 
@@ -52,7 +53,7 @@ export async function handleMessages(
       return await handleNonStreamRequest(anthropicReq, tokenInfo);
     }
   } catch (error) {
-    console.error("Error handling messages:", error);
+    logger.error("处理 messages 请求失败", logger.Err(error));
     return Response.json(
       { error: (error as Error).message || "Internal server error" },
       { status: 500 },
@@ -80,7 +81,7 @@ export async function handleChatCompletions(
       return await handleNonStreamRequest(anthropicReq, tokenInfo);
     }
   } catch (error) {
-    console.error("Error handling chat completions:", error);
+    logger.error("处理 chat completions 请求失败", logger.Err(error));
     return Response.json(
       { error: (error as Error).message || "Internal server error" },
       { status: 500 },
@@ -213,12 +214,11 @@ async function handleNonStreamRequest(
   const cwReq = anthropicToCodeWhisperer(anthropicReq, conversationId);
 
   const reqStr = JSON.stringify(cwReq, null, 2);
-  console.log("Sending request to CodeWhisperer:");
-  console.log("Request size:", reqStr.length, "bytes");
+  logger.debug("发送请求到 CodeWhisperer", logger.Int("request_size", reqStr.length));
 
   // Debug: Log full request for tool use debugging
   if (Deno.env.get("DEBUG_TOOLS") === "true") {
-    console.log("Full request:", reqStr);
+    logger.debug("完整请求", logger.Any("request", JSON.parse(reqStr)));
   }
 
   // Log tool information if present
@@ -227,30 +227,33 @@ async function handleNonStreamRequest(
   const toolResults =
     cwReq.conversationState.currentMessage.userInputMessage.userInputMessageContext.toolResults;
   if (tools && tools.length > 0) {
-    console.log("Tools:", tools.length, "tool(s) defined");
+    logger.debug("工具定义", logger.Int("tool_count", tools.length));
     // Log first tool schema for debugging
     if (tools[0]) {
-      console.log(
-        "First tool schema sample:",
-        JSON.stringify(tools[0].toolSpecification.inputSchema.json, null, 2).substring(0, 500),
+      logger.debug(
+        "第一个工具模式示例",
+        logger.Any(
+          "schema",
+          JSON.stringify(tools[0].toolSpecification.inputSchema.json, null, 2).substring(0, 500),
+        ),
       );
     }
   }
   if (toolResults && toolResults.length > 0) {
-    console.log("Tool results:", toolResults.length, "result(s) provided");
-    console.log("Tool results:", JSON.stringify(toolResults, null, 2));
+    logger.debug("工具结果", logger.Int("result_count", toolResults.length));
+    logger.debug("工具结果详情", logger.Any("results", toolResults));
   }
 
   // Log history summary
   const history = cwReq.conversationState.history;
   if (history && history.length > 0) {
-    console.log("History:", history.length, "message(s)");
+    logger.debug("历史消息", logger.Int("history_count", history.length));
     // Check for tool uses in history
     const historyWithTools = history.filter((h: any) =>
       h.assistantResponseMessage?.toolUses?.length > 0
     );
     if (historyWithTools.length > 0) {
-      console.log("History contains", historyWithTools.length, "message(s) with tool uses");
+      logger.debug("历史包含工具使用", logger.Int("tool_use_messages", historyWithTools.length));
     }
   }
 
@@ -265,15 +268,19 @@ async function handleNonStreamRequest(
 
   if (!response.ok) {
     const errorText = await response.text();
-    console.error(`CodeWhisperer API error: ${response.status}`, errorText);
-    console.error("Failed request:", reqStr);
+    logger.error(
+      "CodeWhisperer API 错误",
+      logger.Int("status", response.status),
+      logger.String("error", errorText),
+    );
+    logger.debug("失败的请求", logger.String("request", reqStr));
     throw new Error(`CodeWhisperer API error: ${response.status}`);
   }
 
   // Read response as binary (AWS EventStream format)
   const responseBuffer = await response.arrayBuffer();
   const data = new Uint8Array(responseBuffer);
-  console.log("CodeWhisperer response size:", data.length);
+  logger.debug("CodeWhisperer 响应大小", logger.Int("size", data.length));
 
   // Parse AWS EventStream binary format
   let content = "";
@@ -327,7 +334,7 @@ async function handleNonStreamRequest(
         // Accumulate input - CodeWhisperer sends JSON in fragments
         if (event.input !== undefined && event.input !== null) {
           const tool = toolUsesMap.get(toolId)!;
-          
+
           if (typeof event.input === "object" && !Array.isArray(event.input)) {
             // Complete object received - use it directly
             tool.input = event.input;
@@ -344,15 +351,16 @@ async function handleNonStreamRequest(
         const toolId = event.toolUseId;
         const tool = toolUsesMap.get(toolId);
         const inputBuffer = toolInputBuffers.get(toolId);
-        
+
         if (tool && inputBuffer && inputBuffer.trim()) {
           try {
             tool.input = JSON.parse(inputBuffer);
           } catch (e) {
-            console.warn(
-              `Failed to parse complete tool input for ${toolId}:`,
-              inputBuffer.substring(0, 200),
-              "Error:", (e as Error).message
+            logger.warn(
+              "解析工具输入失败",
+              logger.String("tool_id", toolId),
+              logger.String("input", inputBuffer.substring(0, 200)),
+              logger.Err(e),
             );
             // Keep empty input if parse fails
           }
@@ -373,10 +381,11 @@ async function handleNonStreamRequest(
         try {
           tool.input = JSON.parse(buffer);
         } catch (e) {
-          console.warn(
-            `Failed to parse buffered input for ${toolId}:`,
-            buffer.substring(0, 200),
-            "Error:", (e as Error).message
+          logger.warn(
+            "解析缓冲输入失败",
+            logger.String("tool_id", toolId),
+            logger.String("buffer", buffer.substring(0, 200)),
+            logger.Err(e),
           );
         }
       }
@@ -385,10 +394,10 @@ async function handleNonStreamRequest(
 
   const toolUses = Array.from(toolUsesMap.values());
 
-  console.log("Extracted content length:", content.length);
-  console.log("Extracted tool uses count:", toolUses.length);
+  logger.debug("提取内容", logger.Int("content_length", content.length));
+  logger.debug("提取工具使用", logger.Int("tool_use_count", toolUses.length));
   if (toolUses.length > 0) {
-    console.log("Tool uses:", JSON.stringify(toolUses, null, 2));
+    logger.debug("工具使用详情", logger.Any("tool_uses", toolUses));
   }
 
   // Build content blocks

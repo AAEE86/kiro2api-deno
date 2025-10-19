@@ -15,6 +15,7 @@
 - ✅ **流式响应**: 零延迟 SSE 实时传输
 - ✅ **图片支持**: data URL 格式的图片输入
 - ✅ **工具调用**: 完整的 tool use 支持
+- ✅ **Web 管理界面**: 实时监控 Token 池状态
 
 ### Deno 优势
 
@@ -87,17 +88,26 @@ deno task compile
 
 详细部署指南请查看 [DEPLOY.md](./DEPLOY.md)
 
+## Web 管理界面
+
+访问 `http://localhost:8080/` 可以看到实时的 Token 池监控面板：
+
+- 🔐 **Token 状态概览**: 总数、可用数、最后更新时间
+- 📊 **详细信息表格**: 用户邮箱、Token 预览、认证方式、剩余次数、过期时间等
+- 🔄 **自动刷新**: 可选的 30 秒自动刷新功能
+- 🎨 **现代化 UI**: 渐变背景、毛玻璃效果、响应式设计
+
 ## API 接口
 
 ### 支持的端点
 
-| 端点                   | 方法 | 描述                     |
-| ---------------------- | ---- | ------------------------ |
-| `/`                    | GET  | 欢迎信息                 |
-| `/api/tokens`          | GET  | Token 池状态（无需认证） |
-| `/v1/models`           | GET  | 获取可用模型列表         |
-| `/v1/messages`         | POST | Anthropic API 兼容接口   |
-| `/v1/chat/completions` | POST | OpenAI API 兼容接口      |
+| 端点                   | 方法 | 描述                       |
+| ---------------------- | ---- | -------------------------- |
+| `/`                    | GET  | Web 管理界面               |
+| `/api/tokens`          | GET  | Token 池状态 API（无需认证）|
+| `/v1/models`           | GET  | 获取可用模型列表           |
+| `/v1/messages`         | POST | Anthropic API 兼容接口     |
+| `/v1/chat/completions` | POST | OpenAI API 兼容接口        |
 
 ### 使用示例
 
@@ -195,6 +205,12 @@ claude-code --model claude-sonnet-4 "帮我重构这段代码"
 deno-impl/
 ├── main.ts                 # 主入口文件
 ├── deno.json              # Deno 配置
+├── static/                # 静态文件（Web 界面）
+│   ├── index.html
+│   ├── css/
+│   │   └── dashboard.css
+│   └── js/
+│       └── dashboard.js
 ├── types/                 # TypeScript 类型定义
 │   ├── common.ts
 │   ├── anthropic.ts
@@ -310,8 +326,8 @@ LOG_LEVEL=debug deno task start
 
 - ✅ 核心功能完全兼容
 - ✅ API 接口完全兼容
+- ✅ Web 管理界面（从 Go 版本移植）
 - ⚠️ 部分高级特性简化实现
-- ❌ 暂不支持静态文件服务（可轻松添加）
 
 ## 许可证
 
