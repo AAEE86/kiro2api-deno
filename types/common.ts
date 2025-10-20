@@ -8,7 +8,65 @@ export interface Usage {
   output_tokens?: number;
 }
 
-// Token management
+// Convert usage to Anthropic format
+export function toAnthropicFormat(usage: Usage): Usage {
+  return {
+    input_tokens: usage.prompt_tokens,
+    output_tokens: usage.completion_tokens,
+  };
+}
+
+// Convert usage to OpenAI format
+export function toOpenAIFormat(usage: Usage): Usage {
+  let total = (usage.prompt_tokens || 0) + (usage.completion_tokens || 0);
+  if (total === 0) {
+    total = (usage.input_tokens || 0) + (usage.output_tokens || 0);
+  }
+  return {
+    prompt_tokens: (usage.prompt_tokens || 0) + (usage.input_tokens || 0),
+    completion_tokens: (usage.completion_tokens || 0) + (usage.output_tokens || 0),
+    total_tokens: total,
+  };
+}
+
+// Model not found error structure
+export interface ModelNotFoundErrorDetail {
+  code: string;
+  message: string;
+  type: string;
+}
+
+export interface ModelNotFoundError {
+  error: ModelNotFoundErrorDetail;
+}
+
+// Create model not found error
+export function createModelNotFoundError(
+  model: string,
+  requestId: string
+): ModelNotFoundError {
+  return {
+    error: {
+      code: "model_not_found",
+      message: `分组 default 下模型 ${model} 无可用渠道（distributor） (request id: ${requestId})`,
+      type: "new_api_error",
+    },
+  };
+}
+
+// Model not found error class
+export class ModelNotFoundErrorType extends Error {
+  errorData: ModelNotFoundError;
+
+  constructor(model: string, requestId: string) {
+    const errorData = createModelNotFoundError(model, requestId);
+    super(`model not found: ${errorData.error.message}`);
+    this.name = "ModelNotFoundErrorType";
+    this.errorData = errorData;
+  }
+}
+
+// Legacy token types for backward compatibility
 export interface TokenInfo {
   accessToken: string;
   refreshToken: string;
@@ -22,16 +80,8 @@ export interface TokenWithUsage {
   configIndex: number;
   availableCount?: number;
   isUsageExceeded?: boolean;
-  usageLimits?: any;
+  usageLimits?: unknown;
   lastUsageCheck?: Date;
-}
-
-export interface RefreshResponse {
-  accessToken: string;
-  expiresIn: number;
-  refreshToken?: string;
-  profileArn?: string;
-  tokenType?: string;
 }
 
 // Image source structure
@@ -69,3 +119,7 @@ export interface ModelsResponse {
   object: string;
   data: Model[];
 }
+
+// Re-export token types for backward compatibility
+export type { Token, RefreshResponse, RefreshRequest, IdcRefreshRequest } from "./token.ts";
+export { isTokenExpired, createTokenFromRefreshResponse } from "./token.ts";
