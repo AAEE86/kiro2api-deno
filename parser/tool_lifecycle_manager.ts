@@ -22,6 +22,49 @@ export class ToolLifecycleManager {
     this.textIntroGenerated = false;
   }
 
+  public getActiveTools(): Map<string, ToolExecution> {
+    return new Map(this.activeTools);
+  }
+
+  public getCompletedTools(): Map<string, ToolExecution> {
+    return new Map(this.completedTools);
+  }
+
+  public getBlockIndex(toolId: string): number {
+    return this.blockIndexMap.get(toolId) ?? -1;
+  }
+
+  public updateToolArguments(toolId: string, args: Record<string, unknown>): void {
+    const execution = this.activeTools.get(toolId) || this.completedTools.get(toolId);
+    if (execution) {
+      execution.arguments = args;
+    }
+  }
+
+  public generateToolSummary(): Record<string, any> {
+    const activeCount = this.activeTools.size;
+    const completedCount = this.completedTools.size;
+    let errorCount = 0;
+    let totalExecutionTime = 0;
+
+    for (const tool of this.completedTools.values()) {
+      if (tool.status === ToolStatus.Error) {
+        errorCount++;
+      }
+      if (tool.endTime) {
+        totalExecutionTime += tool.endTime.getTime() - tool.startTime.getTime();
+      }
+    }
+
+    return {
+      active_tools: activeCount,
+      completed_tools: completedCount,
+      error_tools: errorCount,
+      total_execution_time: totalExecutionTime,
+      success_rate: completedCount > 0 ? (completedCount - errorCount) / completedCount : 0,
+    };
+  }
+
   public handleToolCallRequest(request: { toolCalls: ToolCall[] }): SSEEvent[] {
     const events: SSEEvent[] = [];
 

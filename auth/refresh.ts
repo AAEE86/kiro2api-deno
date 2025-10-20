@@ -40,6 +40,14 @@ async function refreshIdCToken(config: AuthConfig): Promise<TokenInfo> {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
+      "Host": "oidc.us-east-1.amazonaws.com",
+      "Connection": "keep-alive",
+      "x-amz-user-agent": "aws-sdk-js/3.738.0 ua/2.1 os/other lang/js md/browser#unknown_unknown api/sso-oidc#3.738.0 m/E KiroIDE",
+      "Accept": "*/*",
+      "Accept-Language": "*",
+      "sec-fetch-mode": "cors",
+      "User-Agent": "node",
+      "Accept-Encoding": "br, gzip, deflate",
     },
     body: JSON.stringify({
       clientId: config.clientId,

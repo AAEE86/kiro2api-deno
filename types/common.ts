@@ -20,8 +20,10 @@ export interface TokenInfo {
 export interface TokenWithUsage {
   tokenInfo: TokenInfo;
   configIndex: number;
-  remainingRequests?: number;
-  totalRequests?: number;
+  availableCount?: number;
+  isUsageExceeded?: boolean;
+  usageLimits?: any;
+  lastUsageCheck?: Date;
 }
 
 export interface RefreshResponse {

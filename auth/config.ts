@@ -10,10 +10,32 @@ export interface AuthConfig {
 
 // Load authentication configurations from environment
 export async function loadAuthConfigs(): Promise<AuthConfig[]> {
+  // Check for deprecated environment variables
+  const deprecatedVars = [
+    "REFRESH_TOKEN",
+    "AWS_REFRESHTOKEN",
+    "IDC_REFRESH_TOKEN",
+    "BULK_REFRESH_TOKENS",
+  ];
+
+  for (const envVar of deprecatedVars) {
+    if (Deno.env.get(envVar)) {
+      console.warn(`⚠️  检测到已弃用的环境变量: ${envVar}`);
+      console.warn(`   请迁移到 KIRO_AUTH_TOKEN 的 JSON 格式`);
+      console.warn(`   示例: KIRO_AUTH_TOKEN='[{"auth":"Social","refreshToken":"your_token"}]'`);
+    }
+  }
+
   const authToken = Deno.env.get("KIRO_AUTH_TOKEN");
 
   if (!authToken) {
-    throw new Error("KIRO_AUTH_TOKEN environment variable not set");
+    throw new Error(
+      "未找到 KIRO_AUTH_TOKEN 环境变量\n" +
+      "请设置: KIRO_AUTH_TOKEN='[{\"auth\":\"Social\",\"refreshToken\":\"your_token\"}]'\n" +
+      "或设置为配置文件路径: KIRO_AUTH_TOKEN=/path/to/config.json\n" +
+      "支持的认证方式: Social, IdC\n" +
+      "详细配置请参考: .env.example"
+    );
   }
 
   // Check if it's a file path

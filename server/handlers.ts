@@ -6,6 +6,9 @@ import { anthropicToCodeWhisperer, generateId, openAIToAnthropic } from "../conv
 import { AWS_ENDPOINTS, MODEL_MAP } from "../config/constants.ts";
 import { CompliantEventStreamParser } from "../parser/compliant_event_stream_parser.ts";
 import { ToolLifecycleManager } from "../parser/tool_lifecycle_manager.ts";
+import { SSEStateManager } from "./sse_state_manager.ts";
+import { StopReasonManager, getStopReasonDescription } from "./stop_reason_manager.ts";
+import { ErrorMapper } from "./error_mapper.ts";
 import * as logger from "../logger/logger.ts";
 // Handle /v1/models endpoint
 export async function handleModels(): Promise<Response> {
@@ -95,6 +98,7 @@ async function handleStreamRequest(
   tokenInfo: TokenInfo,
 ): Promise<Response> {
   const conversationId = crypto.randomUUID();
+  const messageId = generateId("msg");
   const cwReq = anthropicToCodeWhisperer(anthropicReq, conversationId);
 
   const stream = new ReadableStream({
@@ -110,87 +114,133 @@ async function handleStreamRequest(
         });
 
         if (!response.ok || !response.body) {
-          throw new Error(`CodeWhisperer API error: ${response.status}`);
+          // 使用错误映射器
+          const errorMapper = new ErrorMapper();
+          const errorText = await response.text();
+          const claudeError = errorMapper.mapCodeWhispererError(response.status, errorText);
+          const errorResp = errorMapper.createErrorResponse(claudeError);
+          controller.enqueue(new TextEncoder().encode(await errorResp.text()));
+          controller.close();
+          return;
         }
 
         const reader = response.body.getReader();
         const decoder = new TextDecoder();
         const encoder = new TextEncoder();
-        const toolManager = new ToolLifecycleManager();
         const parser = new CompliantEventStreamParser();
+        const sseStateManager = new SSEStateManager(false);
+        const stopReasonManager = new StopReasonManager();
+        
+        const toolUseIdByBlockIndex = new Map<number, string>();
+        const completedToolUseIds = new Set<string>();
+        let totalOutputTokens = 0;
 
         // Send initial events
         const startEvent = {
           type: "message_start",
           message: {
-            id: generateId("msg"),
+            id: messageId,
             type: "message",
             role: "assistant",
             model: anthropicReq.model,
+            content: [],
+            stop_reason: null,
+            usage: { input_tokens: 0, output_tokens: 0 },
           },
         };
-        controller.enqueue(encoder.encode(`data: ${JSON.stringify(startEvent)}\n\n`));
+        
+        const validation = sseStateManager.validateAndSend(startEvent);
+        if (validation.valid) {
+          controller.enqueue(encoder.encode(`data: ${JSON.stringify(startEvent)}\n\n`));
+        }
 
-        const blockStartEvent = {
-          type: "content_block_start",
-          index: 0,
-          content_block: { type: "text", text: "" },
-        };
-        controller.enqueue(encoder.encode(`data: ${JSON.stringify(blockStartEvent)}\n\n`));
-
-        let toolUseDetected = false;
+        const pingEvent = { type: "ping" };
+        controller.enqueue(encoder.encode(`data: ${JSON.stringify(pingEvent)}\n\n`));
 
         while (true) {
           const { done, value } = await reader.read();
           if (done) break;
 
           const chunk = decoder.decode(value, { stream: true });
-          const { events, toolCalls } = parser.parseStream(chunk);
-
-          if (toolCalls.length > 0) {
-            toolUseDetected = true;
-            const toolEvents = toolManager.handleToolCallRequest({ toolCalls });
-            for (const event of toolEvents) {
-              controller.enqueue(encoder.encode(`data: ${JSON.stringify(event.data)}\n\n`));
-            }
-          }
+          const { events } = parser.parseStream(chunk);
 
           for (const event of events) {
-            if (event.event === "content_block_delta") {
-              controller.enqueue(encoder.encode(`data: ${JSON.stringify(event.data)}\n\n`));
-            } else if (event.event === "content_block_stop") {
-              toolManager.handleToolCallResult({
-                toolCallId: (event.data as any).tool_call_id,
-                result: {},
-              });
-              const toolEvents = toolManager.handleToolCallResult({
-                toolCallId: (event.data as any).tool_call_id,
-                result: {},
-              });
-              for (const event of toolEvents) {
-                controller.enqueue(encoder.encode(`data: ${JSON.stringify(event.data)}\n\n`));
+            const dataMap = event.data as Record<string, any>;
+            const eventType = dataMap.type;
+
+            // 处理工具使用
+            if (eventType === "content_block_start") {
+              const contentBlock = dataMap.content_block as Record<string, any>;
+              if (contentBlock?.type === "tool_use") {
+                const index = dataMap.index as number;
+                const toolId = contentBlock.id as string;
+                toolUseIdByBlockIndex.set(index, toolId);
               }
+            } else if (eventType === "content_block_stop") {
+              const index = dataMap.index as number;
+              const toolId = toolUseIdByBlockIndex.get(index);
+              if (toolId) {
+                completedToolUseIds.add(toolId);
+                toolUseIdByBlockIndex.delete(index);
+              }
+            } else if (eventType === "content_block_delta") {
+              const delta = dataMap.delta as Record<string, any>;
+              if (delta?.type === "text_delta" && delta.text) {
+                totalOutputTokens += Math.ceil((delta.text as string).length / 4);
+              }
+            }
+
+            // 验证并发送事件
+            const validation = sseStateManager.validateAndSend(dataMap);
+            if (validation.valid) {
+              controller.enqueue(encoder.encode(`data: ${JSON.stringify(dataMap)}\n\n`));
             }
           }
         }
 
-        // Send final events
-        const blockStopEvent = { type: "content_block_stop", index: 0 };
-        controller.enqueue(encoder.encode(`data: ${JSON.stringify(blockStopEvent)}\n\n`));
+        // 关闭未关闭的块
+        for (const [index, block] of sseStateManager.getActiveBlocks().entries()) {
+          if (block.started && !block.stopped) {
+            const stopEvent = { type: "content_block_stop", index };
+            const validation = sseStateManager.validateAndSend(stopEvent);
+            if (validation.valid) {
+              controller.enqueue(encoder.encode(`data: ${JSON.stringify(stopEvent)}\n\n`));
+            }
+          }
+        }
 
-        const stopReason = toolUseDetected ? "tool_use" : "end_turn";
+        // 更新stop reason
+        stopReasonManager.updateToolCallStatus(
+          toolUseIdByBlockIndex.size > 0,
+          completedToolUseIds.size > 0
+        );
+        const stopReason = stopReasonManager.determineStopReason();
+
+        logger.debug("流式响应stop_reason决策",
+          logger.String("stop_reason", stopReason),
+          logger.String("description", getStopReasonDescription(stopReason))
+        );
+
+        // Send final events
         const stopEvent = {
           type: "message_delta",
-          delta: { stop_reason: stopReason },
-          usage: { output_tokens: 0 }, // Placeholder
+          delta: { stop_reason: stopReason, stop_sequence: null },
+          usage: { output_tokens: Math.max(1, totalOutputTokens) },
         };
-        controller.enqueue(encoder.encode(`data: ${JSON.stringify(stopEvent)}\n\n`));
+        const validation2 = sseStateManager.validateAndSend(stopEvent);
+        if (validation2.valid) {
+          controller.enqueue(encoder.encode(`data: ${JSON.stringify(stopEvent)}\n\n`));
+        }
 
         const messageStopEvent = { type: "message_stop" };
-        controller.enqueue(encoder.encode(`data: ${JSON.stringify(messageStopEvent)}\n\n`));
+        const validation3 = sseStateManager.validateAndSend(messageStopEvent);
+        if (validation3.valid) {
+          controller.enqueue(encoder.encode(`data: ${JSON.stringify(messageStopEvent)}\n\n`));
+        }
 
         controller.close();
       } catch (error) {
+        logger.error("流式请求处理失败", logger.Err(error));
         controller.error(error);
       }
     },
@@ -201,6 +251,7 @@ async function handleStreamRequest(
       "Content-Type": "text/event-stream",
       "Cache-Control": "no-cache",
       "Connection": "keep-alive",
+      "X-Accel-Buffering": "no",
     },
   });
 }

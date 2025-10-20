@@ -5,30 +5,24 @@ import {
   handleModels,
   handleTokenStatus,
 } from "./server/handlers.ts";
+import { handleCountTokens } from "./server/count_tokens_handler.ts";
+import { handleOpenAINonStreamRequest, handleOpenAIStreamRequest } from "./server/openai_handlers.ts";
+import { requestIDMiddleware, validateAPIKey, requiresAuth, getCORSHeaders } from "./server/middleware.ts";
 import { DEFAULTS } from "./config/constants.ts";
 import * as logger from "./logger/logger.ts";
 import { join } from "https://deno.land/std@0.208.0/path/mod.ts";
 
 // Middleware to check authorization
 function checkAuth(req: Request, clientToken: string): boolean {
-  // Skip auth for non-v1 endpoints
   const url = new URL(req.url);
-  if (!url.pathname.startsWith("/v1")) {
+  const protectedPrefixes = ["/v1"];
+  
+  // Skip auth for non-protected endpoints
+  if (!requiresAuth(url.pathname, protectedPrefixes)) {
     return true;
   }
 
-  const authHeader = req.headers.get("authorization");
-  const apiKey = req.headers.get("x-api-key");
-
-  if (authHeader?.startsWith("Bearer ")) {
-    return authHeader.substring(7) === clientToken;
-  }
-
-  if (apiKey) {
-    return apiKey === clientToken;
-  }
-
-  return false;
+  return validateAPIKey(req, clientToken);
 }
 
 // Serve static files
@@ -81,12 +75,11 @@ async function handleRequest(
 ): Promise<Response> {
   const url = new URL(req.url);
 
+  // Generate request ID
+  const requestId = requestIDMiddleware(req);
+  
   // CORS headers
-  const corsHeaders = {
-    "Access-Control-Allow-Origin": "*",
-    "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
-    "Access-Control-Allow-Headers": "Content-Type, Authorization, x-api-key",
-  };
+  const corsHeaders = getCORSHeaders();
 
   // Handle OPTIONS preflight
   if (req.method === "OPTIONS") {
@@ -111,6 +104,8 @@ async function handleRequest(
       response = await handleTokenStatus(authService);
     } else if (url.pathname === "/v1/messages" && req.method === "POST") {
       response = await handleMessages(req, authService);
+    } else if (url.pathname === "/v1/messages/count_tokens" && req.method === "POST") {
+      response = await handleCountTokens(req);
     } else if (url.pathname === "/v1/chat/completions" && req.method === "POST") {
       response = await handleChatCompletions(req, authService);
     } else if (url.pathname === "/" && req.method === "GET") {
@@ -123,11 +118,12 @@ async function handleRequest(
       response = new Response("Not Found", { status: 404 });
     }
 
-    // Add CORS headers to response
+    // Add CORS headers and request ID to response
     const headers = new Headers(response.headers);
     Object.entries(corsHeaders).forEach(([key, value]) => {
-      headers.set(key, value);
+      headers.set(key, value as string);
     });
+    headers.set("X-Request-ID", requestId);
 
     return new Response(response.body, {
       status: response.status,
@@ -241,10 +237,11 @@ async function main() {
         logger.info("AuthToken 验证已启用");
         logger.info("可用端点:");
         logger.info("  GET  /                        - Web 管理界面");
-        logger.info("  GET  /api/tokens              - Token 池状态 (API)");
-        logger.info("  GET  /v1/models               - 模型列表");
-        logger.info("  POST /v1/messages             - Anthropic API 代理");
-        logger.info("  POST /v1/chat/completions     - OpenAI API 代理");
+        logger.info("  GET  /api/tokens                  - Token 池状态 (API)");
+        logger.info("  GET  /v1/models                   - 模型列表");
+        logger.info("  POST /v1/messages                 - Anthropic API 代理");
+        logger.info("  POST /v1/messages/count_tokens    - Token 计数接口");
+        logger.info("  POST /v1/chat/completions         - OpenAI API 代理");
         logger.info("按 Ctrl+C 停止服务器");
         logger.info(`\n🚀 kiro2api (Deno) listening on http://${hostname}:${port}\n`);
         logger.info(`📊 Web Dashboard: http://${hostname}:${port}\n`);

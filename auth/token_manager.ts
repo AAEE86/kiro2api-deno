@@ -7,12 +7,17 @@ import { UsageLimitsChecker, calculateAvailableCount } from "./usage_checker.ts"
 interface TokenCache {
   token: TokenInfo;
   configIndex: number;
+  cachedAt: Date;
+  lastUsed: Date;
+  available: number;
+  usageInfo?: any;
 }
 
 export class TokenManager {
   private configs: AuthConfig[];
   private tokenCache: Map<number, TokenCache> = new Map();
   private currentIndex = 0;
+  private exhausted: Set<number> = new Set();
   private refreshLocks: Map<number, Promise<TokenInfo>> = new Map();
 
   constructor(configs: AuthConfig[]) {
@@ -30,27 +35,55 @@ export class TokenManager {
     const maxAttempts = this.configs.length;
 
     for (let attempt = 0; attempt < maxAttempts; attempt++) {
+      const configIndex = this.currentIndex;
+      const config = this.configs[configIndex];
+
       try {
-        const configIndex = this.currentIndex;
-        const config = this.configs[configIndex];
+        // Check if token is exhausted
+        const cached = this.tokenCache.get(configIndex);
+        if (cached && cached.available <= 0) {
+          this.exhausted.add(configIndex);
+          this.currentIndex = (this.currentIndex + 1) % this.configs.length;
+          logger.debug(
+            "Token 已耗尽，切换到下一个",
+            logger.Int("exhausted_index", configIndex),
+            logger.Int("next_index", this.currentIndex)
+          );
+          continue;
+        }
 
         // Get or refresh token
         const token = await this.getOrRefreshToken(configIndex, config);
+        const cachedToken = this.tokenCache.get(configIndex)!;
 
-        // Move to next token for next request (sequential rotation)
-        this.currentIndex = (this.currentIndex + 1) % this.configs.length;
+        // Update usage
+        const available = cachedToken.available;
+        if (cachedToken.available > 0) {
+          cachedToken.available--;
+        }
+        cachedToken.lastUsed = new Date();
+
+        logger.debug(
+          "选择 token",
+          logger.Int("config_index", configIndex),
+          logger.Float("available_before", available),
+          logger.Float("available_after", cachedToken.available)
+        );
 
         return {
           tokenInfo: token,
           configIndex,
+          availableCount: available,
+          isUsageExceeded: available <= 0,
         };
       } catch (error) {
         logger.error(
           "获取 token 失败",
-          logger.Int("config_index", this.currentIndex),
+          logger.Int("config_index", configIndex),
           logger.Err(error),
         );
-        // Try next config
+        // Mark as exhausted and try next
+        this.exhausted.add(configIndex);
         this.currentIndex = (this.currentIndex + 1) % this.configs.length;
       }
     }
@@ -100,16 +133,38 @@ export class TokenManager {
 
     const token = await refreshToken(config);
 
-    // Cache the token
+    // Check usage limits
+    const checker = new UsageLimitsChecker();
+    let available = 0;
+    let usageInfo = null;
+
+    try {
+      usageInfo = await checker.checkUsageLimits(token);
+      if (usageInfo) {
+        available = calculateAvailableCount(usageInfo);
+      }
+    } catch (error) {
+      logger.warn("检查使用限制失败", logger.Err(error));
+    }
+
+    // Cache the token with usage info
     this.tokenCache.set(configIndex, {
       token,
       configIndex,
+      cachedAt: new Date(),
+      lastUsed: new Date(),
+      available,
+      usageInfo,
     });
+
+    // Remove from exhausted set
+    this.exhausted.delete(configIndex);
 
     logger.info(
       "Token 刷新成功",
       logger.Int("config_index", configIndex),
       logger.String("expires_at", token.expiresAt.toISOString()),
+      logger.Float("available", available)
     );
 
     return token;

@@ -4,6 +4,9 @@ import type { CodeWhispererRequest } from "../types/codewhisperer.ts";
 import type { ContentBlock } from "../types/common.ts";
 import { DEFAULTS, MODEL_MAP } from "../config/constants.ts";
 import * as logger from "../logger/logger.ts";
+import { validateAndProcessTools, convertOpenAIToolChoiceToAnthropic } from "./tools.ts";
+
+export { convertAnthropicToOpenAI } from "./openai.ts";
 
 // Validate CodeWhisperer request structure
 // Match Go implementation in converter/codewhisperer.go:47-87
@@ -66,9 +69,13 @@ function determineChatTriggerType(req: AnthropicRequest): string {
 export function anthropicToCodeWhisperer(
   req: AnthropicRequest,
   conversationId: string,
+  agentContinuationId?: string,
 ): CodeWhispererRequest {
   // Get the model ID
-  const modelId = MODEL_MAP[req.model] || req.model;
+  const modelId = MODEL_MAP[req.model];
+  if (!modelId) {
+    throw new Error(`Model mapping not found for: ${req.model}`);
+  }
 
   // Extract the last message content
   const lastMessage = req.messages[req.messages.length - 1];
@@ -89,6 +96,37 @@ export function anthropicToCodeWhisperer(
 
   // Build history from previous messages (matching Go implementation)
   const history: unknown[] = [];
+
+  // Add system messages to history if present
+  if (req.system && req.system.length > 0) {
+    const systemContentParts: string[] = [];
+    for (const sysMsg of req.system) {
+      if (typeof sysMsg === "string") {
+        systemContentParts.push(sysMsg);
+      } else if (typeof sysMsg === "object" && sysMsg.type === "text" && sysMsg.text) {
+        systemContentParts.push(sysMsg.text);
+      }
+    }
+
+    if (systemContentParts.length > 0) {
+      history.push({
+        userInputMessage: {
+          content: systemContentParts.join("\n").trim(),
+          modelId,
+          origin: DEFAULTS.ORIGIN,
+          images: [],
+          userInputMessageContext: {},
+        },
+      });
+
+      history.push({
+        assistantResponseMessage: {
+          content: "OK",
+          toolUses: null,
+        },
+      });
+    }
+  }
 
   // Buffer for collecting consecutive user messages
   let userMessagesBuffer: typeof req.messages = [];
@@ -151,13 +189,7 @@ export function anthropicToCodeWhisperer(
         const textContent = extractTextContent(msg.content);
         const toolUses = extractToolUses(msg.content);
 
-        // Map tool uses to correct format (don't filter out empty inputs)
-        // Go version ensures empty inputs become empty objects, not filtered out
-        const validToolUses = toolUses.map((tu: any) => ({
-          toolUseId: tu.toolUseId,
-          name: tu.name,
-          input: tu.input || {}, // Ensure input is at least an empty object
-        }));
+        const validToolUses = toolUses;
 
         history.push({
           assistantResponseMessage: {
@@ -239,7 +271,7 @@ export function anthropicToCodeWhisperer(
 
   const cwReq: CodeWhispererRequest = {
     conversationState: {
-      agentContinuationId: crypto.randomUUID(),
+      agentContinuationId: agentContinuationId || crypto.randomUUID(),
       agentTaskType: DEFAULTS.AGENT_TASK_TYPE,
       chatTriggerType: determineChatTriggerType(req),
       currentMessage: {
@@ -287,12 +319,25 @@ export function openAIToAnthropic(req: OpenAIRequest): AnthropicRequest {
     };
   });
 
+  // Extract system messages from messages array (OpenAI format)
+  const systemMessages: any[] = [];
+  const nonSystemMessages = messages.filter((msg) => {
+    if (msg.role === "system") {
+      if (typeof msg.content === "string") {
+        systemMessages.push({ type: "text", text: msg.content });
+      }
+      return false;
+    }
+    return true;
+  });
+
   return {
     model: req.model,
     max_tokens: req.max_tokens || DEFAULTS.MAX_TOKENS,
-    messages,
-    stream: req.stream || false,
+    messages: nonSystemMessages,
+    stream: req.stream ?? false,
     temperature: req.temperature,
+    system: systemMessages.length > 0 ? systemMessages : undefined,
     tools,
     tool_choice: toolChoice,
   };
@@ -300,358 +345,181 @@ export function openAIToAnthropic(req: OpenAIRequest): AnthropicRequest {
 
 // Extract text content from message
 function extractTextContent(content: unknown): string {
-  if (typeof content === "string") {
-    return content;
-  }
+  if (typeof content === "string") return content;
   if (Array.isArray(content)) {
-    const textBlock = content.find((b) => b.type === "text");
-    return textBlock?.text || "";
+    return content.filter(b => b.type === "text").map(b => b.text).join("");
   }
   return "";
 }
 
 // Extract images from content
 function extractImages(content: unknown) {
-  const images: Array<{ format: string; source: { bytes: string } }> = [];
-
-  if (Array.isArray(content)) {
-    for (const block of content) {
-      if (block.type === "image" && block.source) {
-        const format = block.source.media_type?.split("/")[1] || "png";
-        images.push({
-          format,
-          source: {
-            bytes: block.source.data,
-          },
-        });
-      }
-    }
-  }
-
-  return images;
+  if (!Array.isArray(content)) return [];
+  
+  return content
+    .filter(b => b.type === "image" && b.source)
+    .map(b => ({
+      format: b.source.media_type?.split("/")[1] || "png",
+      source: { bytes: b.source.data }
+    }));
 }
 
 // Extract tool results from content
-// Match Go implementation in converter/codewhisperer.go:89-203
 function extractToolResults(content: unknown) {
-  const toolResults: Array<any> = [];
+  if (!Array.isArray(content)) return [];
 
-  if (Array.isArray(content)) {
-    for (const block of content) {
-      if (block.type === "tool_result") {
-        // Validate required fields
-        if (!block.tool_use_id) {
-          logger.warn("tool_result 缺少 tool_use_id，跳过");
-          continue;
+  return content
+    .filter(b => b.type === "tool_result" && b.tool_use_id)
+    .map(b => {
+      let contentArray: any[] = [];
+
+      if (b.content !== undefined && b.content !== null) {
+        if (typeof b.content === "string") {
+          contentArray = [{ text: b.content }];
+        } else if (Array.isArray(b.content)) {
+          contentArray = b.content.map(item => 
+            typeof item === "string" ? { text: item } : item
+          ).filter(item => item);
+        } else if (typeof b.content === "object") {
+          contentArray = [b.content];
+        } else {
+          contentArray = [{ text: String(b.content) }];
         }
-
-        let contentArray: any[] = [];
-
-        // Process content following Go implementation logic
-        if (block.content !== undefined && block.content !== null) {
-          if (typeof block.content === "string") {
-            // String -> wrap in text object
-            contentArray = [{ text: block.content }];
-          } else if (Array.isArray(block.content)) {
-            // Array -> convert each item
-            for (const item of block.content) {
-              if (typeof item === "string") {
-                contentArray.push({ text: item });
-              } else if (typeof item === "object" && item !== null) {
-                contentArray.push(item);
-              }
-            }
-          } else if (typeof block.content === "object") {
-            // Object -> wrap in array
-            contentArray = [block.content];
-          } else {
-            // Other types -> convert to string and wrap
-            contentArray = [{ text: String(block.content) }];
-          }
-        }
-
-        // Ensure contentArray is not empty (minimum requirement)
-        if (contentArray.length === 0) {
-          contentArray = [{ text: "" }];
-        }
-
-        toolResults.push({
-          toolUseId: block.tool_use_id,
-          content: contentArray,
-          status: block.is_error ? "error" : "success",
-          isError: block.is_error || false,
-        });
       }
-    }
-  }
 
-  return toolResults;
+      if (contentArray.length === 0) contentArray = [{ text: "" }];
+
+      return {
+        toolUseId: b.tool_use_id,
+        content: contentArray,
+        status: b.is_error ? "error" : "success",
+        isError: b.is_error || false,
+      };
+    });
 }
 
 // Extract tool uses from content
-// Match Go implementation in converter/codewhisperer.go:525-607
 function extractToolUses(content: unknown) {
-  const toolUses: Array<any> = [];
+  if (typeof content === "string" || !Array.isArray(content)) return [];
 
-  if (Array.isArray(content)) {
-    for (const block of content) {
-      if (block.type === "tool_use") {
-        // Validate required fields first
-        if (!block.id || !block.name) {
-          logger.warn("tool_use 缺少 id 或 name，跳过", logger.Any("block", block));
-          continue;
-        }
-
-        // Filter web_search (silent filter, don't send to upstream)
-        if (block.name === "web_search" || block.name === "websearch") {
-          continue;
-        }
-
-        // Ensure input is always a map, even if missing or null
-        // This matches Go logic: toolUse.Input = map[string]any{}
-        let input: Record<string, unknown> = {};
-        if (block.input && typeof block.input === "object" && !Array.isArray(block.input)) {
-          input = block.input;
-        }
-
-        toolUses.push({
-          toolUseId: block.id,
-          name: block.name,
-          input: input,
-        });
-      }
-    }
-  } else if (typeof content === "string") {
-    // Pure text content, no tool uses
-    return [];
-  }
-
-  return toolUses;
+  return content
+    .filter(b => 
+      b.type === "tool_use" && 
+      b.id && 
+      b.name && 
+      b.name !== "web_search" && 
+      b.name !== "websearch"
+    )
+    .map(b => ({
+      toolUseId: b.id,
+      name: b.name,
+      input: (b.input && typeof b.input === "object" && !Array.isArray(b.input)) ? b.input : {},
+    }));
 }
 
 // Convert Anthropic tools to CodeWhisperer format
 function convertToolsToCodeWhisperer(tools: unknown[]) {
-  const validTools: any[] = [];
-
-  for (const tool of tools as any[]) {
-    // Filter web_search
-    if (tool.name === "web_search" || tool.name === "websearch") continue;
-
-    // Clean input schema
-    const cleanedSchema = cleanToolSchema(tool.input_schema);
-
-    validTools.push({
+  return (tools as any[])
+    .filter(t => t.name !== "web_search" && t.name !== "websearch")
+    .map(t => ({
       toolSpecification: {
-        name: tool.name,
-        description: tool.description || "",
-        inputSchema: {
-          json: cleanedSchema,
-        },
+        name: t.name,
+        description: t.description || "",
+        inputSchema: { json: t.input_schema },
       },
-    });
-  }
-
-  return validTools;
+    }));
 }
 
-// Clean tool schema by removing unsupported fields
-function cleanToolSchema(schema: any): any {
-  if (!schema || typeof schema !== "object") {
-    return schema;
-  }
 
-  const cleaned = { ...schema };
-
-  // Remove unsupported top-level fields
-  delete cleaned.additionalProperties;
-  delete cleaned.strict;
-  delete cleaned.$schema;
-  delete cleaned.$id;
-  delete cleaned.$ref;
-  delete cleaned.definitions;
-  delete cleaned.$defs;
-
-  // Ensure type is set
-  if (!cleaned.type) {
-    cleaned.type = "object";
-  }
-
-  // Ensure properties exists for object type
-  if (cleaned.type === "object" && !cleaned.properties) {
-    cleaned.properties = {};
-  }
-
-  // Clean nested properties recursively
-  if (cleaned.properties && typeof cleaned.properties === "object") {
-    const cleanedProps: any = {};
-    for (const [key, value] of Object.entries(cleaned.properties)) {
-      // Truncate long parameter names (CodeWhisperer limit)
-      let cleanedKey = key;
-      if (key.length > 64) {
-        cleanedKey = key.length > 80
-          ? key.substring(0, 20) + "_" + key.substring(key.length - 20)
-          : key.substring(0, 30) + "_param";
-      }
-
-      if (typeof value === "object" && value !== null) {
-        cleanedProps[cleanedKey] = cleanToolSchema(value);
-      } else {
-        cleanedProps[cleanedKey] = value;
-      }
-    }
-    cleaned.properties = cleanedProps;
-  }
-
-  // Update required array with cleaned parameter names
-  if (cleaned.required && Array.isArray(cleaned.required)) {
-    cleaned.required = cleaned.required.map((req: any) => {
-      if (typeof req === "string" && req.length > 64) {
-        return req.length > 80
-          ? req.substring(0, 20) + "_" + req.substring(req.length - 20)
-          : req.substring(0, 30) + "_param";
-      }
-      return req;
-    }).filter((req: any) => typeof req === "string" && req !== "");
-  }
-
-  // Clean items for array type
-  if (cleaned.items && typeof cleaned.items === "object") {
-    cleaned.items = cleanToolSchema(cleaned.items);
-  }
-
-  // Validate object type has properties
-  if (
-    cleaned.type === "object" &&
-    (!cleaned.properties || Object.keys(cleaned.properties).length === 0)
-  ) {
-    cleaned.properties = {};
-  }
-
-  return cleaned;
-}
-
-// Validate and process tools (filter unsupported tools like web_search)
-function validateAndProcessTools(tools: any[]): any[] {
-  const validTools: any[] = [];
-
-  for (const tool of tools) {
-    // Only support function type
-    if (tool.type !== "function") continue;
-
-    // Filter unsupported tools (web_search)
-    const name = tool.function?.name;
-    if (!name || name === "web_search" || name === "websearch") continue;
-
-    // Validate parameters
-    if (!tool.function.parameters) continue;
-
-    // Clean schema
-    const cleanedSchema = cleanToolSchema(tool.function.parameters);
-
-    validTools.push({
-      name: tool.function.name,
-      description: tool.function.description || "",
-      input_schema: cleanedSchema,
-    });
-  }
-
-  return validTools;
-}
-
-// Convert OpenAI tool_choice to Anthropic format
-function convertOpenAIToolChoiceToAnthropic(toolChoice: any): any {
-  if (!toolChoice) return undefined;
-
-  // String format: "auto", "none", "required"
-  if (typeof toolChoice === "string") {
-    switch (toolChoice) {
-      case "auto":
-        return { type: "auto" };
-      case "required":
-      case "any":
-        return { type: "any" };
-      case "none":
-        return undefined; // Anthropic doesn't have "none"
-      default:
-        return { type: "auto" };
-    }
-  }
-
-  // Object format: {type: "function", function: {name: "tool_name"}}
-  if (typeof toolChoice === "object") {
-    if (toolChoice.type === "function" && toolChoice.function?.name) {
-      return {
-        type: "tool",
-        name: toolChoice.function.name,
-      };
-    }
-  }
-
-  return { type: "auto" };
-}
 
 // Convert OpenAI content blocks to Anthropic format
 function convertOpenAIContentToAnthropic(content: any[]): any[] {
-  const converted: any[] = [];
+  return content.map(block => {
+    if (!block.type) return block;
 
-  for (const block of content) {
-    if (!block.type) {
-      converted.push(block);
-      continue;
+    if (block.type === "image_url" && block.image_url?.url) {
+      const url = block.image_url.url;
+      if (url.startsWith("data:")) {
+        const match = url.match(/^data:image\/(\w+);base64,(.+)$/);
+        if (match) {
+          return {
+            type: "image",
+            source: { type: "base64", media_type: `image/${match[1]}`, data: match[2] },
+          };
+        }
+      }
+      logger.warn("跳过非base64图片URL", logger.String("url", url.substring(0, 50)));
+      return null;
     }
 
-    switch (block.type) {
-      case "text":
-        converted.push(block);
-        break;
-
-      case "image_url": {
-        // Convert OpenAI image_url to Anthropic image format
-        const imageUrl = block.image_url;
-        if (imageUrl?.url) {
-          const url = imageUrl.url;
-
-          // Handle data URLs
-          if (url.startsWith("data:")) {
-            const match = url.match(/^data:image\/(\w+);base64,(.+)$/);
-            if (match) {
-              converted.push({
-                type: "image",
-                source: {
-                  type: "base64",
-                  media_type: `image/${match[1]}`,
-                  data: match[2],
-                },
-              });
-            }
-          }
-        }
-        break;
-      }
-
-      case "image":
-        converted.push(block);
-        break;
-
-      case "tool_use": {
-        // Filter web_search
-        if (block.name === "web_search" || block.name === "websearch") {
-          break;
-        }
-        converted.push(block);
-        break;
-      }
-
-      case "tool_result":
-        converted.push(block);
-        break;
-
-      default:
-        converted.push(block);
+    if (block.type === "tool_use" && (block.name === "web_search" || block.name === "websearch")) {
+      return null;
     }
+
+    return block;
+  }).filter(b => b !== null);
+}
+
+// Parse content block from raw object
+export function parseContentBlock(block: Record<string, any>): any {
+  const blockType = block.type;
+  if (!blockType || typeof blockType !== "string") {
+    throw new Error("Content block missing type field");
   }
 
-  return converted;
+  const contentBlock: any = { type: blockType };
+
+  switch (blockType) {
+    case "text":
+      if (typeof block.text === "string") {
+        contentBlock.text = block.text;
+      } else {
+        logger.warn("Text block missing text field or not a string");
+      }
+      break;
+
+    case "image":
+      if (block.source && typeof block.source === "object") {
+        contentBlock.source = {
+          type: block.source.type || "base64",
+          media_type: block.source.media_type,
+          data: block.source.data,
+        };
+      }
+      break;
+
+    case "image_url":
+      // Convert OpenAI image_url to Anthropic format
+      if (block.image_url && typeof block.image_url === "object") {
+        const url = block.image_url.url;
+        if (url && url.startsWith("data:")) {
+          const match = url.match(/^data:image\/(\w+);base64,(.+)$/);
+          if (match) {
+            contentBlock.type = "image";
+            contentBlock.source = {
+              type: "base64",
+              media_type: `image/${match[1]}`,
+              data: match[2],
+            };
+          }
+        }
+      }
+      break;
+
+    case "tool_result":
+      contentBlock.tool_use_id = block.tool_use_id;
+      contentBlock.content = block.content;
+      contentBlock.is_error = block.is_error || false;
+      break;
+
+    case "tool_use":
+      contentBlock.id = block.id;
+      contentBlock.name = block.name;
+      contentBlock.input = block.input || {};
+      break;
+  }
+
+  return contentBlock;
 }
 
 // Generate unique IDs
