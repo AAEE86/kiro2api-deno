@@ -1,6 +1,5 @@
 import type { ToolCall, ToolCallError, ToolCallResult } from "./event_stream_types.ts";
 import { SSEEvent, ToolExecution, ToolStatus } from "./event_stream_types.ts";
-import { SafeUnreachableError } from "../utils/error.ts";
 /**
  * Manages the lifecycle of tool calls within a streaming session, mirroring the logic
  * from the Go implementation. It is responsible for tracking tool execution states
@@ -41,7 +40,7 @@ export class ToolLifecycleManager {
     }
   }
 
-  public generateToolSummary(): Record<string, any> {
+  public generateToolSummary(): Record<string, unknown> {
     const activeCount = this.activeTools.size;
     const completedCount = this.completedTools.size;
     let errorCount = 0;
@@ -82,7 +81,7 @@ export class ToolLifecycleManager {
           if (Object.keys(argumentsParsed).length > 0) {
             existing.arguments = argumentsParsed;
           }
-        } catch (e) {
+        } catch {
           // Ignore parsing errors
         }
         continue;
@@ -91,7 +90,7 @@ export class ToolLifecycleManager {
       let argumentsParsed: Record<string, unknown>;
       try {
         argumentsParsed = JSON.parse(toolCall.function.arguments);
-      } catch (e) {
+      } catch {
         argumentsParsed = {};
       }
 

@@ -1,16 +1,30 @@
 import * as logger from "../logger/logger.ts";
 
-// 标准化错误响应
-export function respondError(message: string, status = 500): Response {
+/**
+ * 标准化错误响应
+ * @param message 错误消息
+ * @param status HTTP状态码
+ * @param code 错误码（可选）
+ * @returns Response对象
+ */
+export function respondError(
+  message: string,
+  status = 500,
+  code?: string,
+): Response {
+  const errorCode = code || getErrorType(status);
   return Response.json({
     error: {
       message,
-      type: getErrorType(status),
+      type: errorCode,
+      code: errorCode,
     },
   }, { status });
 }
 
-// 根据状态码获取错误类型
+/**
+ * 根据状态码获取错误类型
+ */
 function getErrorType(status: number): string {
   switch (status) {
     case 400:
@@ -28,13 +42,32 @@ function getErrorType(status: number): string {
   }
 }
 
+/**
+ * 格式化错误响应（支持格式化字符串）
+ */
+export function respondErrorf(
+  status: number,
+  format: string,
+  ...args: unknown[]
+): Response {
+  const message = formatString(format, ...args);
+  return respondError(message, status);
+}
+
+/**
+ * 简单的字符串格式化
+ */
+function formatString(format: string, ...args: unknown[]): string {
+  return format.replace(/%s/g, () => String(args.shift() || ""));
+}
+
 // 日志字段辅助函数
 export interface LogContext {
   requestId?: string;
   messageId?: string;
 }
 
-export function addLogFields(ctx: LogContext, ...fields: any[]): any[] {
+export function addLogFields(ctx: LogContext, ...fields: unknown[]): unknown[] {
   const result = [];
   if (ctx.requestId) {
     result.push(logger.String("request_id", ctx.requestId));

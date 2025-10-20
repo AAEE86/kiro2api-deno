@@ -31,7 +31,7 @@ export class SSEStateManager {
   }
 
   // 验证并发送事件
-  validateAndSend(eventData: Record<string, any>): { valid: boolean; error?: string } {
+  validateAndSend(eventData: Record<string, unknown>): { valid: boolean; error?: string } {
     const eventType = eventData.type as string;
 
     switch (eventType) {
@@ -52,7 +52,7 @@ export class SSEStateManager {
     }
   }
 
-  private handleMessageStart(_eventData: Record<string, any>): { valid: boolean; error?: string } {
+  private handleMessageStart(_eventData: Record<string, unknown>): { valid: boolean; error?: string } {
     if (this.messageStarted) {
       const errMsg = "违规：message_start只能出现一次";
       logger.error(errMsg);
@@ -65,7 +65,7 @@ export class SSEStateManager {
     return { valid: true };
   }
 
-  private handleContentBlockStart(eventData: Record<string, any>): { valid: boolean; error?: string } {
+  private handleContentBlockStart(eventData: Record<string, unknown>): { valid: boolean; error?: string } {
     if (!this.messageStarted) {
       const errMsg = "违规：content_block_start必须在message_start之后";
       logger.error(errMsg);
@@ -92,7 +92,7 @@ export class SSEStateManager {
       return { valid: false };
     }
 
-    const contentBlock = eventData.content_block as Record<string, any>;
+    const contentBlock = eventData.content_block as Record<string, unknown>;
     const blockType = contentBlock?.type as string ?? "text";
 
     // 工具块启动前自动关闭文本块
@@ -122,7 +122,7 @@ export class SSEStateManager {
     return { valid: true };
   }
 
-  private handleContentBlockDelta(eventData: Record<string, any>): { valid: boolean; error?: string } {
+  private handleContentBlockDelta(eventData: Record<string, unknown>): { valid: boolean; error?: string } {
     const index = eventData.index as number;
     if (index === undefined) {
       const errMsg = "content_block_delta缺少有效索引";
@@ -136,7 +136,7 @@ export class SSEStateManager {
     if (!block?.started) {
       logger.debug("检测到content_block_delta但块未启动，自动生成content_block_start");
       
-      const delta = eventData.delta as Record<string, any>;
+      const delta = eventData.delta as Record<string, unknown>;
       const blockType = delta?.type === "input_json_delta" ? "tool_use" : "text";
 
       this.activeBlocks.set(index, {
@@ -161,7 +161,7 @@ export class SSEStateManager {
     return { valid: true };
   }
 
-  private handleContentBlockStop(eventData: Record<string, any>): { valid: boolean; error?: string } {
+  private handleContentBlockStop(eventData: Record<string, unknown>): { valid: boolean; error?: string } {
     const index = eventData.index as number;
     if (index === undefined) {
       const errMsg = "content_block_stop缺少有效索引";
@@ -193,7 +193,7 @@ export class SSEStateManager {
     return { valid: true };
   }
 
-  private handleMessageDelta(_eventData: Record<string, any>): { valid: boolean; error?: string } {
+  private handleMessageDelta(_eventData: Record<string, unknown>): { valid: boolean; error?: string } {
     if (!this.messageStarted) {
       const errMsg = "违规：message_delta必须在message_start之后";
       logger.error(errMsg);
@@ -233,7 +233,7 @@ export class SSEStateManager {
     return { valid: true };
   }
 
-  private handleMessageStop(_eventData: Record<string, any>): { valid: boolean; error?: string } {
+  private handleMessageStop(_eventData: Record<string, unknown>): { valid: boolean; error?: string } {
     if (!this.messageStarted) {
       const errMsg = "违规：message_stop必须在message_start之后";
       logger.error(errMsg);

@@ -10,7 +10,7 @@ interface TokenCache {
   cachedAt: Date;
   lastUsed: Date;
   available: number;
-  usageInfo?: any;
+  usageInfo?: unknown;
 }
 
 export class TokenManager {
@@ -179,8 +179,7 @@ export class TokenManager {
 
   // Get token pool status - matching Go version implementation
   async getTokenPoolStatus() {
-    const now = new Date();
-    const tokenList: any[] = [];
+    const tokenList: Array<Record<string, unknown>> = [];
     let activeCount = 0;
     const checker = new UsageLimitsChecker();
 
@@ -253,7 +252,7 @@ export class TokenManager {
       }
 
       // Build token data
-      const tokenData: any = {
+      const tokenData: Record<string, unknown> = {
         index: i,
         user_email: this.maskEmail(userEmail),
         token_preview: this.createTokenPreview(cached.token.accessToken),

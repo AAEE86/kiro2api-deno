@@ -43,7 +43,7 @@ export class SonicStreamingJSONAggregator {
       return { complete: false, fullInput: "" };
     }
 
-    const parseResult = this.tryParse(streamer);
+    this.tryParse(streamer);
     streamer.isComplete = true;
 
     let fullInput = "{}";

@@ -1,4 +1,6 @@
 import type { Token } from "./token.ts";
+import { isTokenExpired } from "./token.ts";
+import { TOKEN_CACHE_TTL_MS } from "../config/runtime.ts";
 
 // Free trial information
 export interface FreeTrialInfo {
@@ -105,8 +107,8 @@ export function getAvailableCount(token: TokenWithUsage): number {
 
 // Check if token is usable (considering expiration and usage limits)
 export function isTokenUsable(token: TokenWithUsage): boolean {
-  // Check if token is expired
-  if (token.expiresAt && new Date() > token.expiresAt) {
+  // Check if token is expired (align with Go's Token.IsExpired)
+  if (isTokenExpired(token)) {
     return false;
   }
 
@@ -122,7 +124,7 @@ export function isTokenUsable(token: TokenWithUsage): boolean {
 // Check if usage refresh is needed
 export function needsUsageRefresh(
   token: TokenWithUsage,
-  cacheTTL: number
+  cacheTTL: number = TOKEN_CACHE_TTL_MS,
 ): boolean {
   // Never checked usage status
   if (!token.usageLimits) return true;

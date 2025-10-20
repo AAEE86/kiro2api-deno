@@ -20,7 +20,7 @@ export function createHTTPClient(): Deno.HttpClient | undefined {
 
 export const sharedHTTPClient = createHTTPClient();
 
-export async function doRequest(url: string | URL, init?: RequestInit): Promise<Response> {
+export function doRequest(url: string | URL, init?: RequestInit): Promise<Response> {
   if (sharedHTTPClient) {
     return fetch(url, { ...init, client: sharedHTTPClient });
   }

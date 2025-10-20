@@ -59,7 +59,6 @@ export function parseDataURL(dataURL: string): { mediaType: string; base64Data: 
   if (!isBase64) throw new Error("仅支持base64编码的data URL");
   if (!isSupportedImageFormat(mediaType)) throw new Error(`不支持的图片格式: ${mediaType}`);
 
-  const decoder = new TextDecoder();
   const decodedData = Uint8Array.from(atob(data), c => c.charCodeAt(0));
 
   if (decodedData.length > MaxImageSize) {

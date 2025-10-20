@@ -1,21 +1,43 @@
-import type { OpenAIRequest } from "../types/openai.ts";
-import type { TokenInfo } from "../types/common.ts";
+import type { OpenAIRequest, OpenAIResponse, OpenAIMessage, OpenAIToolCall } from "../types/openai.ts";
+import type { TokenInfo, TokenWithUsage } from "../types/common.ts";
 import { openAIToAnthropic } from "../converter/converter.ts";
 import { anthropicToCodeWhisperer, generateId } from "../converter/converter.ts";
 import { AWS_ENDPOINTS } from "../config/constants.ts";
-import { CompliantEventStreamParser } from "../parser/compliant_event_stream_parser.ts";
+import { TokenEstimator } from "../utils/token_estimator.ts";
+import { respondError } from "./common.ts";
+import { handleOpenAIStreamRequest as streamProcessor } from "./openai_stream_processor.ts";
 import * as logger from "../logger/logger.ts";
 
 // 处理OpenAI非流式请求
 export async function handleOpenAINonStreamRequest(
   openaiReq: OpenAIRequest,
   tokenInfo: TokenInfo,
+  requestId?: string,
 ): Promise<Response> {
+  const rid = requestId || crypto.randomUUID();
+
   try {
     // 转换为Anthropic格式
     const anthropicReq = openAIToAnthropic(openaiReq);
     const conversationId = crypto.randomUUID();
     const cwReq = anthropicToCodeWhisperer(anthropicReq, conversationId);
+
+    // Calculate input tokens using TokenEstimator
+    const estimator = new TokenEstimator();
+    const systemMessages = anthropicReq.system?.map(s => ({ text: typeof s === "string" ? s : s.text }));
+    const inputTokens = estimator.estimateTokens({
+      system: systemMessages,
+      messages: anthropicReq.messages,
+      tools: anthropicReq.tools,
+    });
+
+    logger.debug(
+      "发送OpenAI请求到 CodeWhisperer",
+      logger.String("request_id", rid),
+      logger.String("direction", "upstream_request"),
+      logger.String("model", openaiReq.model),
+      logger.Int("input_tokens", inputTokens),
+    );
 
     const response = await fetch(AWS_ENDPOINTS.CODEWHISPERER, {
       method: "POST",
@@ -35,9 +57,8 @@ export async function handleOpenAINonStreamRequest(
     const data = new Uint8Array(responseBuffer);
 
     // 解析响应
-    const parser = new CompliantEventStreamParser();
     let content = "";
-    const toolUsesMap = new Map<string, any>();
+    const toolUsesMap = new Map<string, { type: string; id: string; name: string; input: unknown }>();
     let offset = 0;
 
     while (offset < data.length) {
@@ -87,20 +108,56 @@ export async function handleOpenAINonStreamRequest(
 
     const toolUses = Array.from(toolUsesMap.values());
 
+    // Build content blocks
+    const contentBlocks: Array<{ type: string; text?: string; id?: string; name?: string; input?: unknown }> = [
+      ...(content ? [{ type: "text", text: content }] : []),
+      ...toolUses,
+    ];
+
+    // Calculate output tokens using TokenEstimator
+    let outputTokens = 0;
+    for (const contentBlock of contentBlocks) {
+      const blockType = contentBlock.type;
+
+      switch (blockType) {
+        case "text":
+          if (contentBlock.text) {
+            outputTokens += estimator.estimateTextTokens(contentBlock.text);
+          }
+          break;
+
+        case "tool_use":
+          if (contentBlock.name) {
+            outputTokens += estimator.estimateToolUseTokens(
+              contentBlock.name,
+              contentBlock.input as Record<string, unknown> || {},
+            );
+          }
+          break;
+      }
+    }
+
+    // Minimum token protection
+    outputTokens = Math.max(1, outputTokens);
+
+    logger.debug(
+      "OpenAI非流式响应Token统计",
+      logger.String("request_id", rid),
+      logger.Int("input_tokens", inputTokens),
+      logger.Int("output_tokens", outputTokens),
+    );
+
     // 构建Anthropic响应
     const anthropicResponse = {
       id: generateId("msg"),
       type: "message",
       role: "assistant",
       model: anthropicReq.model,
-      content: [
-        ...(content ? [{ type: "text", text: content }] : []),
-        ...toolUses,
-      ],
+      content: contentBlocks,
       stop_reason: toolUses.length > 0 ? "tool_use" : "stop",
       usage: {
-        input_tokens: 0,
-        output_tokens: Math.max(1, Math.ceil(content.length / 4)),
+        input_tokens: inputTokens,
+        output_tokens: outputTokens,
       },
     };
 
@@ -109,207 +166,31 @@ export async function handleOpenAINonStreamRequest(
 
     return Response.json(openaiResponse);
   } catch (error) {
-    logger.error("处理OpenAI非流式请求失败", logger.Err(error));
-    return Response.json({
-      error: {
-        message: (error as Error).message || "Internal server error",
-        type: "server_error",
-        code: "internal_error",
-      },
-    }, { status: 500 });
+    logger.error(
+      "处理OpenAI非流式请求失败",
+      logger.String("request_id", rid),
+      logger.Err(error),
+    );
+    return respondError("Internal server error", 500);
   }
 }
 
-// 处理OpenAI流式请求
+// 处理OpenAI流式请求 - 使用OpenAIStreamProcessor
 export async function handleOpenAIStreamRequest(
   openaiReq: OpenAIRequest,
-  tokenInfo: TokenInfo,
+  tokenWithUsage: TokenWithUsage,
+  requestId: string,
 ): Promise<Response> {
-  try {
-    // 转换为Anthropic格式
-    const anthropicReq = openAIToAnthropic(openaiReq);
-    const conversationId = crypto.randomUUID();
-    const cwReq = anthropicToCodeWhisperer(anthropicReq, conversationId);
-
-    const response = await fetch(AWS_ENDPOINTS.CODEWHISPERER, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "Authorization": `Bearer ${tokenInfo.accessToken}`,
-      },
-      body: JSON.stringify(cwReq),
-    });
-
-    if (!response.ok || !response.body) {
-      throw new Error(`CodeWhisperer API error: ${response.status}`);
-    }
-
-    const messageId = `chatcmpl-${Date.now()}`;
-    const stream = new ReadableStream({
-      async start(controller) {
-        try {
-          const reader = response.body!.getReader();
-          const decoder = new TextDecoder();
-          const encoder = new TextEncoder();
-          const parser = new CompliantEventStreamParser();
-
-          // 发送初始事件
-          const initialEvent = {
-            id: messageId,
-            object: "chat.completion.chunk",
-            created: Math.floor(Date.now() / 1000),
-            model: openaiReq.model,
-            choices: [{
-              index: 0,
-              delta: { role: "assistant" },
-              finish_reason: null,
-            }],
-          };
-          controller.enqueue(encoder.encode(`data: ${JSON.stringify(initialEvent)}\n\n`));
-
-          const toolIndexByToolUseId = new Map<string, number>();
-          const toolUseIdByBlockIndex = new Map<number, string>();
-          let nextToolIndex = 0;
-          let sawToolUse = false;
-
-          while (true) {
-            const { done, value } = await reader.read();
-            if (done) break;
-
-            const chunk = decoder.decode(value, { stream: true });
-            const { events } = parser.parseStream(chunk);
-
-            for (const event of events) {
-              const dataMap = event.data as Record<string, any>;
-              const eventType = dataMap.type;
-
-              if (eventType === "content_block_delta") {
-                const delta = dataMap.delta as Record<string, any>;
-                
-                if (delta.type === "text_delta" && delta.text) {
-                  const contentEvent = {
-                    id: messageId,
-                    object: "chat.completion.chunk",
-                    created: Math.floor(Date.now() / 1000),
-                    model: openaiReq.model,
-                    choices: [{
-                      index: 0,
-                      delta: { content: delta.text },
-                      finish_reason: null,
-                    }],
-                  };
-                  controller.enqueue(encoder.encode(`data: ${JSON.stringify(contentEvent)}\n\n`));
-                } else if (delta.type === "input_json_delta" && delta.partial_json) {
-                  const blockIndex = dataMap.index as number;
-                  const toolUseId = toolUseIdByBlockIndex.get(blockIndex);
-                  if (toolUseId) {
-                    const toolIdx = toolIndexByToolUseId.get(toolUseId);
-                    if (toolIdx !== undefined) {
-                      const toolDelta = {
-                        id: messageId,
-                        object: "chat.completion.chunk",
-                        created: Math.floor(Date.now() / 1000),
-                        model: openaiReq.model,
-                        choices: [{
-                          index: 0,
-                          delta: {
-                            tool_calls: [{
-                              index: toolIdx,
-                              function: { arguments: delta.partial_json },
-                            }],
-                          },
-                          finish_reason: null,
-                        }],
-                      };
-                      controller.enqueue(encoder.encode(`data: ${JSON.stringify(toolDelta)}\n\n`));
-                    }
-                  }
-                }
-              } else if (eventType === "content_block_start") {
-                const contentBlock = dataMap.content_block as Record<string, any>;
-                if (contentBlock.type === "tool_use") {
-                  const toolUseId = contentBlock.id as string;
-                  const toolName = contentBlock.name as string;
-                  const blockIndex = dataMap.index as number;
-
-                  if (!toolIndexByToolUseId.has(toolUseId)) {
-                    toolIndexByToolUseId.set(toolUseId, nextToolIndex);
-                    nextToolIndex++;
-                  }
-                  toolUseIdByBlockIndex.set(blockIndex, toolUseId);
-                  sawToolUse = true;
-
-                  const toolIdx = toolIndexByToolUseId.get(toolUseId)!;
-                  const toolStart = {
-                    id: messageId,
-                    object: "chat.completion.chunk",
-                    created: Math.floor(Date.now() / 1000),
-                    model: openaiReq.model,
-                    choices: [{
-                      index: 0,
-                      delta: {
-                        tool_calls: [{
-                          index: toolIdx,
-                          id: toolUseId,
-                          type: "function",
-                          function: { name: toolName, arguments: "" },
-                        }],
-                      },
-                      finish_reason: null,
-                    }],
-                  };
-                  controller.enqueue(encoder.encode(`data: ${JSON.stringify(toolStart)}\n\n`));
-                }
-              }
-            }
-          }
-
-          // 发送结束事件
-          const finishReason = sawToolUse ? "tool_calls" : "stop";
-          const finalEvent = {
-            id: messageId,
-            object: "chat.completion.chunk",
-            created: Math.floor(Date.now() / 1000),
-            model: openaiReq.model,
-            choices: [{
-              index: 0,
-              delta: {},
-              finish_reason: finishReason,
-            }],
-          };
-          controller.enqueue(encoder.encode(`data: ${JSON.stringify(finalEvent)}\n\n`));
-          controller.enqueue(encoder.encode("data: [DONE]\n\n"));
-
-          controller.close();
-        } catch (error) {
-          controller.error(error);
-        }
-      },
-    });
-
-    return new Response(stream, {
-      headers: {
-        "Content-Type": "text/event-stream",
-        "Cache-Control": "no-cache",
-        "Connection": "keep-alive",
-      },
-    });
-  } catch (error) {
-    logger.error("处理OpenAI流式请求失败", logger.Err(error));
-    return Response.json({
-      error: {
-        message: (error as Error).message || "Internal server error",
-        type: "server_error",
-        code: "internal_error",
-      },
-    }, { status: 500 });
-  }
+  // 直接使用OpenAIStreamProcessor处理
+  return await streamProcessor(openaiReq, tokenWithUsage, requestId);
 }
 
-// 转换Anthropic响应为OpenAI格式
-function convertAnthropicToOpenAI(anthropicResp: any, model: string): any {
+/**
+ * 转换Anthropic响应为OpenAI格式
+ */
+function convertAnthropicToOpenAI(anthropicResp: Record<string, unknown>, model: string): OpenAIResponse {
   const choices = [];
-  let message: any = {
+  const message: OpenAIMessage = {
     role: "assistant",
     content: null,
   };
@@ -317,7 +198,7 @@ function convertAnthropicToOpenAI(anthropicResp: any, model: string): any {
   // 处理内容
   if (anthropicResp.content && Array.isArray(anthropicResp.content)) {
     const textParts: string[] = [];
-    const toolCalls: any[] = [];
+    const toolCalls: OpenAIToolCall[] = [];
 
     for (const item of anthropicResp.content) {
       if (item.type === "text") {
@@ -349,16 +230,24 @@ function convertAnthropicToOpenAI(anthropicResp: any, model: string): any {
     finish_reason: anthropicResp.stop_reason === "tool_use" ? "tool_calls" : "stop",
   });
 
+  // Map Anthropic usage to OpenAI format
+  const usageObj = anthropicResp.usage as Record<string, unknown> | undefined;
+  const usage = usageObj ? {
+    prompt_tokens: (usageObj.input_tokens as number) || 0,
+    completion_tokens: (usageObj.output_tokens as number) || 0,
+    total_tokens: ((usageObj.input_tokens as number) || 0) + ((usageObj.output_tokens as number) || 0),
+  } : {
+    prompt_tokens: 0,
+    completion_tokens: 0,
+    total_tokens: 0,
+  };
+
   return {
     id: `chatcmpl-${Date.now()}`,
     object: "chat.completion",
     created: Math.floor(Date.now() / 1000),
     model,
     choices,
-    usage: anthropicResp.usage || {
-      prompt_tokens: 0,
-      completion_tokens: 0,
-      total_tokens: 0,
-    },
+    usage,
   };
 }

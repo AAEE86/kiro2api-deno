@@ -1,17 +1,16 @@
 import type { AnthropicRequest } from "../types/anthropic.ts";
-import type { OpenAIRequest } from "../types/openai.ts";
 import type { TokenInfo } from "../types/common.ts";
 import { AuthService } from "../auth/auth_service.ts";
-import { anthropicToCodeWhisperer, generateId, openAIToAnthropic } from "../converter/converter.ts";
+import { anthropicToCodeWhisperer, generateId } from "../converter/converter.ts";
 import { AWS_ENDPOINTS, MODEL_MAP } from "../config/constants.ts";
-import { CompliantEventStreamParser } from "../parser/compliant_event_stream_parser.ts";
-import { ToolLifecycleManager } from "../parser/tool_lifecycle_manager.ts";
-import { SSEStateManager } from "./sse_state_manager.ts";
-import { StopReasonManager, getStopReasonDescription } from "./stop_reason_manager.ts";
-import { ErrorMapper } from "./error_mapper.ts";
+import { TokenEstimator } from "../utils/token_estimator.ts";
+import { handleStreamRequest } from "./stream_processor.ts";
+import { respondError } from "./common.ts";
 import * as logger from "../logger/logger.ts";
+import type { TokenWithUsage } from "../types/common.ts";
+
 // Handle /v1/models endpoint
-export async function handleModels(): Promise<Response> {
+export function handleModels(): Response {
   const models = Object.keys(MODEL_MAP).map((id) => ({
     id,
     object: "model",
@@ -39,233 +38,96 @@ export async function handleMessages(
   req: Request,
   authService: AuthService,
 ): Promise<Response> {
+  const requestId = crypto.randomUUID();
+
   try {
     const anthropicReq: AnthropicRequest = await req.json();
 
     // Validate request
     if (!anthropicReq.messages || anthropicReq.messages.length === 0) {
-      return Response.json({ error: "messages array cannot be empty" }, { status: 400 });
+      return respondError("messages array cannot be empty", 400);
     }
 
-    // Get token
-    const tokenInfo = await authService.getToken();
+    // Get token with usage
+    const tokenWithUsage = await authService.getTokenWithUsage();
 
     if (anthropicReq.stream) {
-      return await handleStreamRequest(anthropicReq, tokenInfo);
+      // Use StreamProcessor for streaming requests
+      return await handleStreamingRequest(anthropicReq, tokenWithUsage, requestId);
     } else {
-      return await handleNonStreamRequest(anthropicReq, tokenInfo);
+      return await handleNonStreamRequest(anthropicReq, tokenWithUsage.tokenInfo, requestId);
     }
   } catch (error) {
-    logger.error("处理 messages 请求失败", logger.Err(error));
-    return Response.json(
-      { error: (error as Error).message || "Internal server error" },
-      { status: 500 },
+    logger.error(
+      "处理 messages 请求失败",
+      logger.String("request_id", requestId),
+      logger.Err(error),
     );
+    return respondError("Internal server error", 500);
   }
 }
 
-// Handle /v1/chat/completions endpoint (OpenAI format)
-export async function handleChatCompletions(
-  req: Request,
-  authService: AuthService,
-): Promise<Response> {
-  try {
-    const openaiReq: OpenAIRequest = await req.json();
 
-    // Convert to Anthropic format
-    const anthropicReq = openAIToAnthropic(openaiReq);
-
-    // Get token
-    const tokenInfo = await authService.getToken();
-
-    if (anthropicReq.stream) {
-      return await handleStreamRequest(anthropicReq, tokenInfo);
-    } else {
-      return await handleNonStreamRequest(anthropicReq, tokenInfo);
-    }
-  } catch (error) {
-    logger.error("处理 chat completions 请求失败", logger.Err(error));
-    return Response.json(
-      { error: (error as Error).message || "Internal server error" },
-      { status: 500 },
-    );
-  }
-}
-
-// Handle streaming requests
-async function handleStreamRequest(
+// Handle streaming requests using StreamProcessor
+async function handleStreamingRequest(
   anthropicReq: AnthropicRequest,
-  tokenInfo: TokenInfo,
+  tokenWithUsage: TokenWithUsage,
+  requestId: string,
 ): Promise<Response> {
   const conversationId = crypto.randomUUID();
-  const messageId = generateId("msg");
   const cwReq = anthropicToCodeWhisperer(anthropicReq, conversationId);
 
-  const stream = new ReadableStream({
-    async start(controller) {
-      try {
-        const response = await fetch(AWS_ENDPOINTS.CODEWHISPERER, {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            "Authorization": `Bearer ${tokenInfo.accessToken}`,
-          },
-          body: JSON.stringify(cwReq),
-        });
+  logger.debug(
+    "发送流式请求到 CodeWhisperer",
+    logger.String("request_id", requestId),
+    logger.String("direction", "upstream_request"),
+    logger.String("model", anthropicReq.model),
+  );
 
-        if (!response.ok || !response.body) {
-          // 使用错误映射器
-          const errorMapper = new ErrorMapper();
-          const errorText = await response.text();
-          const claudeError = errorMapper.mapCodeWhispererError(response.status, errorText);
-          const errorResp = errorMapper.createErrorResponse(claudeError);
-          controller.enqueue(new TextEncoder().encode(await errorResp.text()));
-          controller.close();
-          return;
-        }
-
-        const reader = response.body.getReader();
-        const decoder = new TextDecoder();
-        const encoder = new TextEncoder();
-        const parser = new CompliantEventStreamParser();
-        const sseStateManager = new SSEStateManager(false);
-        const stopReasonManager = new StopReasonManager();
-        
-        const toolUseIdByBlockIndex = new Map<number, string>();
-        const completedToolUseIds = new Set<string>();
-        let totalOutputTokens = 0;
-
-        // Send initial events
-        const startEvent = {
-          type: "message_start",
-          message: {
-            id: messageId,
-            type: "message",
-            role: "assistant",
-            model: anthropicReq.model,
-            content: [],
-            stop_reason: null,
-            usage: { input_tokens: 0, output_tokens: 0 },
-          },
-        };
-        
-        const validation = sseStateManager.validateAndSend(startEvent);
-        if (validation.valid) {
-          controller.enqueue(encoder.encode(`data: ${JSON.stringify(startEvent)}\n\n`));
-        }
-
-        const pingEvent = { type: "ping" };
-        controller.enqueue(encoder.encode(`data: ${JSON.stringify(pingEvent)}\n\n`));
-
-        while (true) {
-          const { done, value } = await reader.read();
-          if (done) break;
-
-          const chunk = decoder.decode(value, { stream: true });
-          const { events } = parser.parseStream(chunk);
-
-          for (const event of events) {
-            const dataMap = event.data as Record<string, any>;
-            const eventType = dataMap.type;
-
-            // 处理工具使用
-            if (eventType === "content_block_start") {
-              const contentBlock = dataMap.content_block as Record<string, any>;
-              if (contentBlock?.type === "tool_use") {
-                const index = dataMap.index as number;
-                const toolId = contentBlock.id as string;
-                toolUseIdByBlockIndex.set(index, toolId);
-              }
-            } else if (eventType === "content_block_stop") {
-              const index = dataMap.index as number;
-              const toolId = toolUseIdByBlockIndex.get(index);
-              if (toolId) {
-                completedToolUseIds.add(toolId);
-                toolUseIdByBlockIndex.delete(index);
-              }
-            } else if (eventType === "content_block_delta") {
-              const delta = dataMap.delta as Record<string, any>;
-              if (delta?.type === "text_delta" && delta.text) {
-                totalOutputTokens += Math.ceil((delta.text as string).length / 4);
-              }
-            }
-
-            // 验证并发送事件
-            const validation = sseStateManager.validateAndSend(dataMap);
-            if (validation.valid) {
-              controller.enqueue(encoder.encode(`data: ${JSON.stringify(dataMap)}\n\n`));
-            }
-          }
-        }
-
-        // 关闭未关闭的块
-        for (const [index, block] of sseStateManager.getActiveBlocks().entries()) {
-          if (block.started && !block.stopped) {
-            const stopEvent = { type: "content_block_stop", index };
-            const validation = sseStateManager.validateAndSend(stopEvent);
-            if (validation.valid) {
-              controller.enqueue(encoder.encode(`data: ${JSON.stringify(stopEvent)}\n\n`));
-            }
-          }
-        }
-
-        // 更新stop reason
-        stopReasonManager.updateToolCallStatus(
-          toolUseIdByBlockIndex.size > 0,
-          completedToolUseIds.size > 0
-        );
-        const stopReason = stopReasonManager.determineStopReason();
-
-        logger.debug("流式响应stop_reason决策",
-          logger.String("stop_reason", stopReason),
-          logger.String("description", getStopReasonDescription(stopReason))
-        );
-
-        // Send final events
-        const stopEvent = {
-          type: "message_delta",
-          delta: { stop_reason: stopReason, stop_sequence: null },
-          usage: { output_tokens: Math.max(1, totalOutputTokens) },
-        };
-        const validation2 = sseStateManager.validateAndSend(stopEvent);
-        if (validation2.valid) {
-          controller.enqueue(encoder.encode(`data: ${JSON.stringify(stopEvent)}\n\n`));
-        }
-
-        const messageStopEvent = { type: "message_stop" };
-        const validation3 = sseStateManager.validateAndSend(messageStopEvent);
-        if (validation3.valid) {
-          controller.enqueue(encoder.encode(`data: ${JSON.stringify(messageStopEvent)}\n\n`));
-        }
-
-        controller.close();
-      } catch (error) {
-        logger.error("流式请求处理失败", logger.Err(error));
-        controller.error(error);
-      }
-    },
-  });
-
-  return new Response(stream, {
+  const upstreamResponse = await fetch(AWS_ENDPOINTS.CODEWHISPERER, {
+    method: "POST",
     headers: {
-      "Content-Type": "text/event-stream",
-      "Cache-Control": "no-cache",
-      "Connection": "keep-alive",
-      "X-Accel-Buffering": "no",
+      "Content-Type": "application/json",
+      "Authorization": `Bearer ${tokenWithUsage.tokenInfo.accessToken}`,
     },
+    body: JSON.stringify(cwReq),
   });
+
+  // Use StreamProcessor to handle the streaming response
+  return await handleStreamRequest(
+    anthropicReq,
+    tokenWithUsage,
+    requestId,
+    upstreamResponse,
+  );
 }
 
-// Handle non-streaming requests
+// Handle non-streaming requests with TokenEstimator
 async function handleNonStreamRequest(
   anthropicReq: AnthropicRequest,
   tokenInfo: TokenInfo,
+  requestId: string,
 ): Promise<Response> {
   const conversationId = crypto.randomUUID();
   const cwReq = anthropicToCodeWhisperer(anthropicReq, conversationId);
 
+  // Calculate input tokens using TokenEstimator
+  const estimator = new TokenEstimator();
+  const systemMessages = anthropicReq.system?.map(s => ({ text: typeof s === "string" ? s : s.text }));
+  const inputTokens = estimator.estimateTokens({
+    system: systemMessages,
+    messages: anthropicReq.messages,
+    tools: anthropicReq.tools,
+  });
+
   const reqStr = JSON.stringify(cwReq, null, 2);
-  logger.debug("发送请求到 CodeWhisperer", logger.Int("request_size", reqStr.length));
+  logger.debug(
+    "发送请求到 CodeWhisperer",
+    logger.String("request_id", requestId),
+    logger.String("direction", "upstream_request"),
+    logger.Int("request_size", reqStr.length),
+    logger.Int("input_tokens", inputTokens),
+  );
 
   // Debug: Log full request for tool use debugging
   if (Deno.env.get("DEBUG_TOOLS") === "true") {
@@ -300,9 +162,10 @@ async function handleNonStreamRequest(
   if (history && history.length > 0) {
     logger.debug("历史消息", logger.Int("history_count", history.length));
     // Check for tool uses in history
-    const historyWithTools = history.filter((h: any) =>
-      h.assistantResponseMessage?.toolUses?.length > 0
-    );
+    const historyWithTools = history.filter((h: unknown) => {
+      const msg = h as { assistantResponseMessage?: { toolUses?: unknown[] } };
+      return msg.assistantResponseMessage?.toolUses?.length ?? 0 > 0;
+    });
     if (historyWithTools.length > 0) {
       logger.debug("历史包含工具使用", logger.Int("tool_use_messages", historyWithTools.length));
     }
@@ -335,7 +198,7 @@ async function handleNonStreamRequest(
 
   // Parse AWS EventStream binary format
   let content = "";
-  const toolUsesMap = new Map<string, any>();
+  const toolUsesMap = new Map<string, { type: string; id: string; name: string; input: unknown }>();
   const toolInputBuffers = new Map<string, string>(); // Buffer for accumulating input strings
   let offset = 0;
 
@@ -428,7 +291,8 @@ async function handleNonStreamRequest(
   for (const [toolId, buffer] of toolInputBuffers.entries()) {
     if (buffer && buffer.trim()) {
       const tool = toolUsesMap.get(toolId);
-      if (tool && Object.keys(tool.input).length === 0) {
+        const toolInput = tool?.input as Record<string, unknown> | undefined;
+        if (tool && toolInput && Object.keys(toolInput).length === 0) {
         try {
           tool.input = JSON.parse(buffer);
         } catch (e) {
@@ -445,18 +309,63 @@ async function handleNonStreamRequest(
 
   const toolUses = Array.from(toolUsesMap.values());
 
-  logger.debug("提取内容", logger.Int("content_length", content.length));
-  logger.debug("提取工具使用", logger.Int("tool_use_count", toolUses.length));
+  logger.debug(
+    "提取内容",
+    logger.String("request_id", requestId),
+    logger.Int("content_length", content.length),
+  );
+  logger.debug(
+    "提取工具使用",
+    logger.String("request_id", requestId),
+    logger.Int("tool_use_count", toolUses.length),
+  );
   if (toolUses.length > 0) {
-    logger.debug("工具使用详情", logger.Any("tool_uses", toolUses));
+    logger.debug(
+      "工具使用详情",
+      logger.String("request_id", requestId),
+      logger.Any("tool_uses", toolUses),
+    );
   }
 
   // Build content blocks
-  const contentBlocks: any[] = [];
+  const contentBlocks: Array<{ type: string; text?: string; id?: string; name?: string; input?: unknown }> = [];
   if (content) {
     contentBlocks.push({ type: "text", text: content });
   }
   contentBlocks.push(...toolUses);
+
+  // Calculate output tokens using TokenEstimator
+  let outputTokens = 0;
+  for (const contentBlock of contentBlocks) {
+    const blockType = contentBlock.type;
+
+    switch (blockType) {
+      case "text":
+        if (contentBlock.text) {
+          outputTokens += estimator.estimateTextTokens(contentBlock.text);
+        }
+        break;
+
+      case "tool_use":
+        if (contentBlock.name) {
+          outputTokens += estimator.estimateToolUseTokens(
+            contentBlock.name,
+            contentBlock.input as Record<string, unknown> || {},
+          );
+        }
+        break;
+    }
+  }
+
+  // Minimum token protection
+  outputTokens = Math.max(1, outputTokens);
+
+  logger.debug(
+    "Token统计",
+    logger.String("request_id", requestId),
+    logger.Int("input_tokens", inputTokens),
+    logger.Int("output_tokens", outputTokens),
+  );
 
   // Convert response to Anthropic format
   const anthropicResponse = {
@@ -467,8 +376,8 @@ async function handleNonStreamRequest(
     content: contentBlocks,
     stop_reason: toolUses.length > 0 ? "tool_use" : "end_turn",
     usage: {
-      input_tokens: 0,
-      output_tokens: Math.max(1, Math.ceil(content.length / 4)),
+      input_tokens: inputTokens,
+      output_tokens: outputTokens,
     },
   };
 

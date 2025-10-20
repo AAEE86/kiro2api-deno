@@ -188,7 +188,7 @@ class TokenDashboard {
                 minute: '2-digit',
                 hour12: false
             });
-        } catch (e) {
+        } catch {
             return '-';
         }
     }

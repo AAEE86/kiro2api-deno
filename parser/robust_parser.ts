@@ -1,5 +1,13 @@
+import {
+  HeaderParser,
+  HeaderValue,
+  getMessageTypeFromHeaders,
+  getEventTypeFromHeaders,
+  getContentTypeFromHeaders,
+} from "./header_parser.ts";
+
 interface EventStreamMessage {
-  headers: Record<string, any>;
+  headers: Record<string, HeaderValue>;
   payload: Uint8Array;
   messageType: string;
   eventType: string;
@@ -13,6 +21,11 @@ export class RobustEventStreamParser {
   private buffer: Uint8Array = new Uint8Array(0);
   private errorCount = 0;
   private maxErrors = 100;
+  private headerParser: HeaderParser;
+
+  constructor() {
+    this.headerParser = new HeaderParser();
+  }
 
   setMaxErrors(maxErrors: number): void {
     this.maxErrors = maxErrors;
@@ -21,6 +34,7 @@ export class RobustEventStreamParser {
   reset(): void {
     this.buffer = new Uint8Array(0);
     this.errorCount = 0;
+    this.headerParser.reset();
   }
 
   parseStream(data: Uint8Array): EventStreamMessage[] {
@@ -45,11 +59,15 @@ export class RobustEventStreamParser {
       this.buffer = this.buffer.slice(totalLength);
 
       try {
+        // 每条消息开始前重置头部解析器
+        this.headerParser.reset();
         const message = this.parseSingleMessage(messageData);
         if (message) {
+          // 验证工具调用完整性
+          this.validateToolUseIdIntegrity(message);
           messages.push(message);
         }
-      } catch (err) {
+      } catch {
         this.errorCount++;
         if (this.errorCount >= this.maxErrors) {
           throw new Error(`Too many errors (${this.errorCount}), stopping parse`);
@@ -76,105 +94,153 @@ export class RobustEventStreamParser {
     const headerData = data.slice(12, 12 + headerLength);
     const payloadStart = 12 + headerLength;
     const payloadEnd = totalLength - 4;
+
+    // 边界检查
+    if (payloadStart > payloadEnd || payloadEnd > data.length) {
+      throw new Error(`Payload boundary error: start=${payloadStart}, end=${payloadEnd}, len=${data.length}`);
+    }
+
     const payloadData = data.slice(payloadStart, payloadEnd);
 
-    const headers = this.parseHeaders(headerData);
+    // 使用新的 HeaderParser 解析头部，支持断点续传和容错
+    let headers: Record<string, HeaderValue>;
+    if (headerData.length === 0) {
+      console.debug("Empty header detected, using defaults");
+      headers = this.headerParser.forceCompleteHeaderParsing(this.headerParser.getState());
+    } else {
+      try {
+        headers = this.headerParser.parseHeaders(headerData);
+        // 检查是否可以恢复
+        if (Object.keys(headers).length === 0 && this.headerParser.isHeaderParseRecoverable(this.headerParser.getState())) {
+          console.warn("Header parsing incomplete, forcing completion");
+          headers = this.headerParser.forceCompleteHeaderParsing(this.headerParser.getState());
+        }
+      } catch (err) {
+        console.warn(`Header parsing failed, using defaults:`, err);
+        headers = this.headerParser.forceCompleteHeaderParsing(this.headerParser.getState());
+      }
+    }
+
+    // 添加 payload 调试信息
+    if (payloadData.length > 0) {
+      const payloadPreview = new TextDecoder().decode(payloadData.slice(0, Math.min(100, payloadData.length)));
+      console.debug(`Payload debug: length=${payloadData.length}, preview=${payloadPreview}...`);
+    }
 
     return {
       headers,
       payload: payloadData,
-      messageType: this.getMessageType(headers),
-      eventType: this.getEventType(headers),
-      contentType: this.getContentType(headers),
+      messageType: getMessageTypeFromHeaders(headers),
+      eventType: getEventTypeFromHeaders(headers),
+      contentType: getContentTypeFromHeaders(headers),
     };
   }
 
-  private parseHeaders(data: Uint8Array): Record<string, any> {
-    const headers: Record<string, any> = {};
-    
-    if (data.length === 0) {
-      return {
-        ":message-type": "event",
-        ":event-type": "assistantResponseEvent",
-        ":content-type": "application/json",
-      };
+  // 工具调用 ID 完整性验证
+  private validateToolUseIdIntegrity(message: EventStreamMessage): void {
+    if (!message || message.payload.length === 0) {
+      return;
     }
 
-    let offset = 0;
-    const view = new DataView(data.buffer, data.byteOffset);
+    const payloadStr = new TextDecoder().decode(message.payload);
 
-    while (offset < data.length) {
-      if (offset + 1 > data.length) break;
-
-      const nameLength = view.getUint8(offset);
-      offset++;
-
-      if (offset + nameLength > data.length) break;
-      const nameBytes = data.slice(offset, offset + nameLength);
-      const name = new TextDecoder().decode(nameBytes);
-      offset += nameLength;
-
-      if (offset + 1 > data.length) break;
-      const valueType = view.getUint8(offset);
-      offset++;
-
-      if (offset + 2 > data.length) break;
-      const valueLength = view.getUint16(offset, false);
-      offset += 2;
-
-      if (offset + valueLength > data.length) break;
-      const valueBytes = data.slice(offset, offset + valueLength);
-      offset += valueLength;
-
-      headers[name] = this.parseHeaderValue(valueType, valueBytes);
-    }
-
-    return headers;
-  }
-
-  private parseHeaderValue(valueType: number, data: Uint8Array): any {
-    const view = new DataView(data.buffer, data.byteOffset);
-
-    switch (valueType) {
-      case 0: // BOOL_TRUE
-        return true;
-      case 1: // BOOL_FALSE
-        return false;
-      case 2: // BYTE
-        return view.getInt8(0);
-      case 3: // SHORT
-        return view.getInt16(0, false);
-      case 4: // INTEGER
-        return view.getInt32(0, false);
-      case 5: // LONG
-        return Number(view.getBigInt64(0, false));
-      case 6: // BYTE_ARRAY
-        return data;
-      case 7: // STRING
-        return new TextDecoder().decode(data);
-      case 8: // TIMESTAMP
-        return Number(view.getBigInt64(0, false));
-      case 9: // UUID
-        if (data.length === 16) {
-          const hex = Array.from(data).map(b => b.toString(16).padStart(2, '0')).join('');
-          return `${hex.slice(0,8)}-${hex.slice(8,12)}-${hex.slice(12,16)}-${hex.slice(16,20)}-${hex.slice(20)}`;
+    if (payloadStr.includes("tool_use_id") || payloadStr.includes("toolUseId")) {
+      const toolUseIds = this.extractToolUseIds(payloadStr);
+      for (const toolUseId of toolUseIds) {
+        if (!this.isValidToolUseIdFormat(toolUseId)) {
+          console.warn(`Detected potentially corrupted tool_use_id: ${toolUseId}`);
         }
-        return new TextDecoder().decode(data);
-      default:
-        return data;
+      }
     }
   }
 
-  private getMessageType(headers: Record<string, any>): string {
-    return headers[":message-type"] || "event";
+  // 从 payload 中提取所有 tool_use_id
+  private extractToolUseIds(payload: string): string[] {
+    const toolUseIds: string[] = [];
+    const searchStr = "tooluse_";
+    let startPos = 0;
+
+    while (true) {
+      const idx = payload.indexOf(searchStr, startPos);
+      if (idx === -1) break;
+
+      // 确保前面是引号或其他分隔符
+      if (idx > 0) {
+        const prevChar = payload[idx - 1];
+        if (prevChar !== '"' && prevChar !== ':' && prevChar !== ' ' && prevChar !== '{') {
+          startPos = idx + 1;
+          continue;
+        }
+      }
+
+      // 查找 ID 的结束位置
+      let end = idx + searchStr.length;
+      while (end < payload.length) {
+        const char = payload[end];
+        const code = char.charCodeAt(0);
+        // 有效字符: 字母、数字、下划线、连字符
+        if (!(
+          (code >= 97 && code <= 122) || // a-z
+          (code >= 65 && code <= 90) ||  // A-Z
+          (code >= 48 && code <= 57) ||  // 0-9
+          char === '_' || char === '-'
+        )) {
+          break;
+        }
+        end++;
+      }
+
+      if (end > idx + searchStr.length) {
+        const toolUseId = payload.substring(idx, end);
+        if (this.isValidToolUseIdFormat(toolUseId)) {
+          toolUseIds.push(toolUseId);
+        } else {
+          console.warn(`Skipping invalid tool_use_id: ${toolUseId}`);
+        }
+      }
+
+      startPos = idx + 1;
+    }
+
+    return toolUseIds;
   }
 
-  private getEventType(headers: Record<string, any>): string {
-    return headers[":event-type"] || "";
-  }
+  // 验证 tool_use_id 格式是否有效
+  private isValidToolUseIdFormat(toolUseId: string): boolean {
+    // 基本格式检查
+    if (!toolUseId.startsWith("tooluse_")) {
+      return false;
+    }
 
-  private getContentType(headers: Record<string, any>): string {
-    return headers[":content-type"] || "application/json";
+    // 长度检查
+    if (toolUseId.length < 20 || toolUseId.length > 50) {
+      console.debug(`tool_use_id length abnormal: ${toolUseId.length}`);
+      return false;
+    }
+
+    // 字符有效性检查
+    const suffix = toolUseId.substring(8);
+    for (let i = 0; i < suffix.length; i++) {
+      const char = suffix[i];
+      const code = char.charCodeAt(0);
+      if (!(
+        (code >= 97 && code <= 122) || // a-z
+        (code >= 65 && code <= 90) ||  // A-Z
+        (code >= 48 && code <= 57) ||  // 0-9
+        char === '_' || char === '-'
+      )) {
+        console.debug(`tool_use_id contains invalid character at position ${i + 8}: ${char}`);
+        return false;
+      }
+    }
+
+    // 检查明显的损坏模式
+    if (toolUseId.includes("tooluluse_") || toolUseId.includes("tooluse_tooluse_")) {
+      console.warn(`Detected obviously corrupted tool_use_id pattern: ${toolUseId}`);
+      return false;
+    }
+
+    return true;
   }
 
   private concatBuffers(a: Uint8Array, b: Uint8Array): Uint8Array {

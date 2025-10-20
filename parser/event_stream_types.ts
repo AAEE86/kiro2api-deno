@@ -9,7 +9,7 @@ export interface ToolCall {
 
 export interface ToolCallResult {
   toolCallId: string;
-  result: any;
+  result: unknown;
 }
 
 export interface ToolCallError {
@@ -19,7 +19,7 @@ export interface ToolCallError {
 
 export interface SSEEvent {
   event: string;
-  data: any;
+  data: unknown;
 }
 
 export enum ToolStatus {
@@ -36,7 +36,7 @@ export interface ToolExecution {
   endTime?: Date;
   status: ToolStatus;
   arguments: Record<string, unknown>;
-  result?: any;
+  result?: unknown;
   error?: string;
   blockIndex: number;
 }

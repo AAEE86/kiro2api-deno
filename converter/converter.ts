@@ -1,10 +1,12 @@
-import type { AnthropicRequest } from "../types/anthropic.ts";
+import type { AnthropicRequest, ToolChoice } from "../types/anthropic.ts";
 import type { OpenAIRequest } from "../types/openai.ts";
 import type { CodeWhispererRequest } from "../types/codewhisperer.ts";
 import type { ContentBlock } from "../types/common.ts";
+import { ModelNotFoundErrorType } from "../types/common.ts";
 import { DEFAULTS, MODEL_MAP } from "../config/constants.ts";
 import * as logger from "../logger/logger.ts";
 import { validateAndProcessTools, convertOpenAIToolChoiceToAnthropic } from "./tools.ts";
+import { validateImageContent } from "./content.ts";
 
 export { convertAnthropicToOpenAI } from "./openai.ts";
 
@@ -57,9 +59,12 @@ function validateCodeWhispererRequest(cwReq: CodeWhispererRequest): void {
 // Determine chat trigger type following Go logic
 function determineChatTriggerType(req: AnthropicRequest): string {
   if (req.tools && req.tools.length > 0) {
-    if (req.tool_choice && typeof req.tool_choice === "object") {
-      const tc: any = req.tool_choice;
-      if (tc.type === "any" || tc.type === "tool") return "AUTO";
+    const tc = req.tool_choice;
+    if (tc && typeof tc === "object") {
+      const tcObj = tc as unknown as Record<string, unknown>;
+      if (tcObj.type === "any" || tcObj.type === "tool") return "AUTO";
+    } else if (typeof tc === "string") {
+      if (tc === "any") return "AUTO";
     }
   }
   return "MANUAL";
@@ -71,10 +76,16 @@ export function anthropicToCodeWhisperer(
   conversationId: string,
   agentContinuationId?: string,
 ): CodeWhispererRequest {
+  const effectiveAgentContinuationId = agentContinuationId || crypto.randomUUID();
+
+  if (!req.messages || req.messages.length === 0) {
+    throw new Error("messages is empty");
+  }
+
   // Get the model ID
   const modelId = MODEL_MAP[req.model];
   if (!modelId) {
-    throw new Error(`Model mapping not found for: ${req.model}`);
+    throw new ModelNotFoundErrorType(req.model, effectiveAgentContinuationId);
   }
 
   // Extract the last message content
@@ -145,8 +156,8 @@ export function anthropicToCodeWhisperer(
       if (userMessagesBuffer.length > 0) {
         // Merge all accumulated user messages
         const contentParts: string[] = [];
-        let allImages: any[] = [];
-        let allToolResults: any[] = [];
+        let allImages: Array<{ format: string; source: { bytes: string } }> = [];
+        let allToolResults: unknown[] = [];
 
         for (const userMsg of userMessagesBuffer) {
           const messageContent = extractTextContent(userMsg.content);
@@ -167,7 +178,7 @@ export function anthropicToCodeWhisperer(
         }
 
         // Build merged user message
-        const userInputMessageContext: any = {};
+        const userInputMessageContext: Record<string, unknown> = {};
         if (allToolResults.length > 0) {
           userInputMessageContext.toolResults = allToolResults;
         }
@@ -212,8 +223,8 @@ export function anthropicToCodeWhisperer(
     );
 
     const contentParts: string[] = [];
-    let allImages: any[] = [];
-    let allToolResults: any[] = [];
+    let allImages: Array<{ format: string; source: { bytes: string } }> = [];
+    let allToolResults: unknown[] = [];
 
     for (const userMsg of userMessagesBuffer) {
       const messageContent = extractTextContent(userMsg.content);
@@ -232,7 +243,7 @@ export function anthropicToCodeWhisperer(
       }
     }
 
-    const userInputMessageContext: any = {};
+    const userInputMessageContext: Record<string, unknown> = {};
     if (allToolResults.length > 0) {
       userInputMessageContext.toolResults = allToolResults;
     }
@@ -256,7 +267,7 @@ export function anthropicToCodeWhisperer(
     });
   }
 
-  const userInputMessageContext: any = {};
+  const userInputMessageContext: Record<string, unknown> = {};
   if (req.tools && req.tools.length > 0) {
     userInputMessageContext.tools = convertToolsToCodeWhisperer(req.tools);
   }
@@ -269,24 +280,24 @@ export function anthropicToCodeWhisperer(
     content = "";
   }
 
-  const cwReq: CodeWhispererRequest = {
-    conversationState: {
-      agentContinuationId: agentContinuationId || crypto.randomUUID(),
-      agentTaskType: DEFAULTS.AGENT_TASK_TYPE,
-      chatTriggerType: determineChatTriggerType(req),
-      currentMessage: {
-        userInputMessage: {
-          userInputMessageContext,
-          content,
-          modelId,
-          images,
-          origin: DEFAULTS.ORIGIN,
-        },
+const cwReq: CodeWhispererRequest = {
+  conversationState: {
+    agentContinuationId: effectiveAgentContinuationId,
+    agentTaskType: DEFAULTS.AGENT_TASK_TYPE,
+    chatTriggerType: determineChatTriggerType(req),
+    currentMessage: {
+      userInputMessage: {
+        userInputMessageContext,
+        content,
+        modelId,
+        images,
+        origin: DEFAULTS.ORIGIN,
       },
-      conversationId,
-      history,
     },
-  };
+    conversationId,
+    history,
+  },
+};
 
   // Validate request before sending
   validateCodeWhispererRequest(cwReq);
@@ -320,16 +331,22 @@ export function openAIToAnthropic(req: OpenAIRequest): AnthropicRequest {
   });
 
   // Extract system messages from messages array (OpenAI format)
-  const systemMessages: any[] = [];
-  const nonSystemMessages = messages.filter((msg) => {
-    if (msg.role === "system") {
-      if (typeof msg.content === "string") {
-        systemMessages.push({ type: "text", text: msg.content });
-      }
-      return false;
+const systemMessages: Array<{ type: string; text: string }> = [];
+const nonSystemMessages = messages.filter((msg) => {
+  if (msg.role === "system") {
+    if (typeof msg.content === "string") {
+      systemMessages.push({ type: "text", text: msg.content });
+    } else if (Array.isArray(msg.content)) {
+      const text = (msg.content as Array<{ type: string; text: string }>)
+        .filter(b => b && b.type === "text" && typeof b.text === "string")
+        .map(b => b.text)
+        .join("");
+      if (text) systemMessages.push({ type: "text", text });
     }
-    return true;
-  });
+    return false;
+  }
+  return true;
+});
 
   return {
     model: req.model,
@@ -339,7 +356,7 @@ export function openAIToAnthropic(req: OpenAIRequest): AnthropicRequest {
     temperature: req.temperature,
     system: systemMessages.length > 0 ? systemMessages : undefined,
     tools,
-    tool_choice: toolChoice,
+    tool_choice: toolChoice as string | ToolChoice | undefined,
   };
 }
 
@@ -347,7 +364,10 @@ export function openAIToAnthropic(req: OpenAIRequest): AnthropicRequest {
 function extractTextContent(content: unknown): string {
   if (typeof content === "string") return content;
   if (Array.isArray(content)) {
-    return content.filter(b => b.type === "text").map(b => b.text).join("");
+    return content
+      .filter((b): b is Record<string, unknown> => typeof b === "object" && b !== null && (b as Record<string, unknown>).type === "text")
+      .map(b => b.text as string)
+      .join("");
   }
   return "";
 }
@@ -356,12 +376,20 @@ function extractTextContent(content: unknown): string {
 function extractImages(content: unknown) {
   if (!Array.isArray(content)) return [];
   
-  return content
-    .filter(b => b.type === "image" && b.source)
-    .map(b => ({
-      format: b.source.media_type?.split("/")[1] || "png",
-      source: { bytes: b.source.data }
-    }));
+return content
+  .filter((b): b is Record<string, unknown> => {
+    if (typeof b !== "object" || b === null) return false;
+    const obj = b as Record<string, unknown>;
+    return obj.type === "image" && !!obj.source && validateImageContent(obj.source);
+  })
+  .map(b => {
+    const source = b.source as Record<string, unknown>;
+    const mediaType = source.media_type as string;
+    return {
+      format: mediaType?.split("/")[1] || "png",
+      source: { bytes: source.data as string }
+    };
+  });
 }
 
 // Extract tool results from content
@@ -369,17 +397,21 @@ function extractToolResults(content: unknown) {
   if (!Array.isArray(content)) return [];
 
   return content
-    .filter(b => b.type === "tool_result" && b.tool_use_id)
+    .filter((b): b is Record<string, unknown> => {
+      if (typeof b !== "object" || b === null) return false;
+      const obj = b as Record<string, unknown>;
+      return obj.type === "tool_result" && !!obj.tool_use_id;
+    })
     .map(b => {
-      let contentArray: any[] = [];
+      let contentArray: unknown[] = [];
 
       if (b.content !== undefined && b.content !== null) {
         if (typeof b.content === "string") {
           contentArray = [{ text: b.content }];
         } else if (Array.isArray(b.content)) {
-          contentArray = b.content.map(item => 
+          contentArray = b.content.map((item: unknown) => 
             typeof item === "string" ? { text: item } : item
-          ).filter(item => item);
+          ).filter((item: unknown) => item);
         } else if (typeof b.content === "object") {
           contentArray = [b.content];
         } else {
@@ -390,10 +422,10 @@ function extractToolResults(content: unknown) {
       if (contentArray.length === 0) contentArray = [{ text: "" }];
 
       return {
-        toolUseId: b.tool_use_id,
+        toolUseId: b.tool_use_id as string,
         content: contentArray,
         status: b.is_error ? "error" : "success",
-        isError: b.is_error || false,
+        isError: (b.is_error as boolean) || false,
       };
     });
 }
@@ -403,23 +435,25 @@ function extractToolUses(content: unknown) {
   if (typeof content === "string" || !Array.isArray(content)) return [];
 
   return content
-    .filter(b => 
-      b.type === "tool_use" && 
-      b.id && 
-      b.name && 
-      b.name !== "web_search" && 
-      b.name !== "websearch"
-    )
+    .filter((b): b is Record<string, unknown> => {
+      if (typeof b !== "object" || b === null) return false;
+      const obj = b as Record<string, unknown>;
+      return obj.type === "tool_use" && 
+        !!obj.id && 
+        !!obj.name && 
+        obj.name !== "web_search" && 
+        obj.name !== "websearch";
+    })
     .map(b => ({
-      toolUseId: b.id,
-      name: b.name,
-      input: (b.input && typeof b.input === "object" && !Array.isArray(b.input)) ? b.input : {},
+      toolUseId: b.id as string,
+      name: b.name as string,
+      input: (b.input && typeof b.input === "object" && !Array.isArray(b.input)) ? b.input as Record<string, unknown> : {},
     }));
 }
 
 // Convert Anthropic tools to CodeWhisperer format
 function convertToolsToCodeWhisperer(tools: unknown[]) {
-  return (tools as any[])
+  return (tools as Array<{ name: string; description: string; input_schema: unknown }>)
     .filter(t => t.name !== "web_search" && t.name !== "websearch")
     .map(t => ({
       toolSpecification: {
@@ -433,13 +467,17 @@ function convertToolsToCodeWhisperer(tools: unknown[]) {
 
 
 // Convert OpenAI content blocks to Anthropic format
-function convertOpenAIContentToAnthropic(content: any[]): any[] {
+function convertOpenAIContentToAnthropic(content: unknown[]): unknown[] {
   return content.map(block => {
-    if (!block.type) return block;
+    if (typeof block !== "object" || block === null) return block;
+    const b = block as Record<string, unknown>;
+    
+    if (!b.type) return block;
 
-    if (block.type === "image_url" && block.image_url?.url) {
-      const url = block.image_url.url;
-      if (url.startsWith("data:")) {
+    if (b.type === "image_url" && b.image_url && typeof b.image_url === "object") {
+      const imageUrl = b.image_url as Record<string, unknown>;
+      const url = imageUrl.url as string;
+      if (url && url.startsWith("data:")) {
         const match = url.match(/^data:image\/(\w+);base64,(.+)$/);
         if (match) {
           return {
@@ -448,11 +486,13 @@ function convertOpenAIContentToAnthropic(content: any[]): any[] {
           };
         }
       }
-      logger.warn("跳过非base64图片URL", logger.String("url", url.substring(0, 50)));
+      if (url) {
+        logger.warn("跳过非base64图片URL", logger.String("url", url.substring(0, 50)));
+      }
       return null;
     }
 
-    if (block.type === "tool_use" && (block.name === "web_search" || block.name === "websearch")) {
+    if (b.type === "tool_use" && (b.name === "web_search" || b.name === "websearch")) {
       return null;
     }
 
@@ -461,13 +501,13 @@ function convertOpenAIContentToAnthropic(content: any[]): any[] {
 }
 
 // Parse content block from raw object
-export function parseContentBlock(block: Record<string, any>): any {
+export function parseContentBlock(block: Record<string, unknown>): ContentBlock {
   const blockType = block.type;
   if (!blockType || typeof blockType !== "string") {
     throw new Error("Content block missing type field");
   }
 
-  const contentBlock: any = { type: blockType };
+  const contentBlock: ContentBlock = { type: blockType };
 
   switch (blockType) {
     case "text":
@@ -480,10 +520,11 @@ export function parseContentBlock(block: Record<string, any>): any {
 
     case "image":
       if (block.source && typeof block.source === "object") {
+        const src = block.source as Record<string, unknown>;
         contentBlock.source = {
-          type: block.source.type || "base64",
-          media_type: block.source.media_type,
-          data: block.source.data,
+          type: (src.type as string) || "base64",
+          media_type: src.media_type as string,
+          data: src.data as string,
         };
       }
       break;
@@ -491,7 +532,8 @@ export function parseContentBlock(block: Record<string, any>): any {
     case "image_url":
       // Convert OpenAI image_url to Anthropic format
       if (block.image_url && typeof block.image_url === "object") {
-        const url = block.image_url.url;
+        const imageUrl = block.image_url as Record<string, unknown>;
+        const url = imageUrl.url as string;
         if (url && url.startsWith("data:")) {
           const match = url.match(/^data:image\/(\w+);base64,(.+)$/);
           if (match) {
@@ -507,15 +549,15 @@ export function parseContentBlock(block: Record<string, any>): any {
       break;
 
     case "tool_result":
-      contentBlock.tool_use_id = block.tool_use_id;
+      contentBlock.tool_use_id = block.tool_use_id as string;
       contentBlock.content = block.content;
-      contentBlock.is_error = block.is_error || false;
+      contentBlock.is_error = (block.is_error as boolean) || false;
       break;
 
     case "tool_use":
-      contentBlock.id = block.id;
-      contentBlock.name = block.name;
-      contentBlock.input = block.input || {};
+      contentBlock.id = block.id as string;
+      contentBlock.name = block.name as string;
+      contentBlock.input = block.input as Record<string, unknown> || {};
       break;
   }
 

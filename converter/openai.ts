@@ -2,7 +2,7 @@ import type { OpenAIResponse, OpenAIChoice, OpenAIMessage, OpenAIToolCall } from
 
 // Convert Anthropic response to OpenAI format
 export function convertAnthropicToOpenAI(
-  anthropicResp: Record<string, any>,
+  anthropicResp: Record<string, unknown>,
   model: string,
   messageId: string,
 ): OpenAIResponse {
@@ -52,11 +52,12 @@ export function convertAnthropicToOpenAI(
   let completionTokens = Math.floor(content.length / 4); // Simple estimation
 
   if (anthropicResp.usage && typeof anthropicResp.usage === "object") {
-    if (typeof anthropicResp.usage.input_tokens === "number") {
-      promptTokens = anthropicResp.usage.input_tokens;
+    const usage = anthropicResp.usage as Record<string, unknown>;
+    if (typeof usage.input_tokens === "number") {
+      promptTokens = usage.input_tokens;
     }
-    if (typeof anthropicResp.usage.output_tokens === "number") {
-      completionTokens = anthropicResp.usage.output_tokens;
+    if (typeof usage.output_tokens === "number") {
+      completionTokens = usage.output_tokens;
     }
   }
 

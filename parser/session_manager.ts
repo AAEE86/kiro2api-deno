@@ -19,7 +19,7 @@ export class SessionManager {
     this.sessionId = sessionId;
   }
 
-  startSession(): Array<{ event: string; data: any }> {
+  startSession(): Array<{ event: string; data: Record<string, unknown> }> {
     this.isActive = true;
     this.startTime = new Date();
 
@@ -33,7 +33,7 @@ export class SessionManager {
     }];
   }
 
-  endSession(): Array<{ event: string; data: any }> {
+  endSession(): Array<{ event: string; data: Record<string, unknown> }> {
     const now = new Date();
     this.endTime = now;
     this.isActive = false;

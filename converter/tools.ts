@@ -1,12 +1,14 @@
 import * as logger from "../logger/logger.ts";
+import type { OpenAITool } from "../types/openai.ts";
+import type { AnthropicTool } from "../types/anthropic.ts";
 
 // Validate and process OpenAI tools
-export function validateAndProcessTools(tools: any[]): any[] {
+export function validateAndProcessTools(tools: OpenAITool[]): AnthropicTool[] {
   if (!tools || tools.length === 0) {
     return [];
   }
 
-  const validTools: any[] = [];
+  const validTools: AnthropicTool[] = [];
   const validationErrors: string[] = [];
 
   for (let i = 0; i < tools.length; i++) {
@@ -42,7 +44,8 @@ export function validateAndProcessTools(tools: any[]): any[] {
         input_schema: cleanedParams,
       });
     } catch (err) {
-      validationErrors.push(`tool[${i}] (${tool.function.name}): ${err.message}`);
+      const message = err instanceof Error ? err.message : String(err);
+      validationErrors.push(`tool[${i}] (${tool.function.name}): ${message}`);
     }
   }
 
@@ -54,7 +57,7 @@ export function validateAndProcessTools(tools: any[]): any[] {
 }
 
 // Clean and validate tool parameters
-export function cleanAndValidateToolParameters(params: Record<string, any>): Record<string, any> {
+export function cleanAndValidateToolParameters(params: Record<string, unknown>): Record<string, unknown> {
   if (!params || typeof params !== "object") {
     throw new Error("Parameters cannot be null or non-object");
   }
@@ -73,7 +76,7 @@ export function cleanAndValidateToolParameters(params: Record<string, any>): Rec
 
   // Handle long parameter names - CodeWhisperer limits parameter name length
   if (cleaned.properties && typeof cleaned.properties === "object") {
-    const cleanedProperties: Record<string, any> = {};
+    const cleanedProperties: Record<string, unknown> = {};
     for (const [paramName, paramDef] of Object.entries(cleaned.properties)) {
       let cleanedName = paramName;
       // If parameter name exceeds 64 characters, simplify it
@@ -90,7 +93,7 @@ export function cleanAndValidateToolParameters(params: Record<string, any>): Rec
 
     // Update required field with cleaned parameter names
     if (cleaned.required && Array.isArray(cleaned.required)) {
-      const cleanedRequired: string[] = [];
+      const cleanedRequired: unknown[] = [];
       for (const req of cleaned.required) {
         if (typeof req === "string") {
           let cleanedReq = req;
@@ -148,7 +151,7 @@ export function cleanAndValidateToolParameters(params: Record<string, any>): Rec
 }
 
 // Convert OpenAI tool_choice to Anthropic format
-export function convertOpenAIToolChoiceToAnthropic(openaiToolChoice: any): any {
+export function convertOpenAIToolChoiceToAnthropic(openaiToolChoice: unknown): unknown {
   if (!openaiToolChoice) {
     return undefined;
   }
@@ -171,11 +174,15 @@ export function convertOpenAIToolChoiceToAnthropic(openaiToolChoice: any): any {
 
   // Handle object type: {type: "function", function: {name: "tool_name"}}
   if (typeof openaiToolChoice === "object") {
-    if (openaiToolChoice.type === "function" && openaiToolChoice.function?.name) {
-      return {
-        type: "tool",
-        name: openaiToolChoice.function.name,
-      };
+    const toolChoice = openaiToolChoice as Record<string, unknown>;
+    if (toolChoice.type === "function" && toolChoice.function && typeof toolChoice.function === "object") {
+      const func = toolChoice.function as Record<string, unknown>;
+      if (func.name) {
+        return {
+          type: "tool",
+          name: func.name as string,
+        };
+      }
     }
   }
 

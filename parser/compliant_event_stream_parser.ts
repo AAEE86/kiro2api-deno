@@ -7,6 +7,10 @@ import { SSEEvent, ToolCall } from "./event_stream_types.ts";
 export class CompliantEventStreamParser {
   private buffer = "";
 
+  public reset(): void {
+    this.buffer = "";
+  }
+
   public parseStream(chunk: string): { events: SSEEvent[]; toolCalls: ToolCall[] } {
     this.buffer += chunk;
     const events: SSEEvent[] = [];
@@ -18,7 +22,7 @@ export class CompliantEventStreamParser {
       this.buffer = this.buffer.substring(eventEndIndex + 4);
 
       const lines = eventString.split("\r\n");
-      let event: Record<string, any> = {};
+      const event: Record<string, unknown> = {};
 
       for (const line of lines) {
         if (line.startsWith("event:")) {
@@ -26,16 +30,17 @@ export class CompliantEventStreamParser {
         } else if (line.startsWith("data:")) {
           try {
             event.data = JSON.parse(line.substring(5).trim());
-          } catch (e) {
+          } catch {
             // Ignore json parse errors
           }
         }
       }
 
       if (event.event && event.data) {
-        events.push(event as SSEEvent);
-        if (event.data.type === "tool_use") {
-          toolCalls.push(event.data as ToolCall);
+        events.push(event as unknown as SSEEvent);
+        const data = event.data as Record<string, unknown>;
+        if (data.type === "tool_use") {
+          toolCalls.push(data as unknown as ToolCall);
         }
       }
     }

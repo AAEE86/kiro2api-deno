@@ -142,10 +142,10 @@ export interface CodeQuery {
 
 // AWS CodeWhisperer assistant response event complete structure
 export interface AssistantResponseEvent {
-  // Core fields
-  conversationId: string;
-  messageId: string;
-  content: string;
+  // Core fields (optional to support streaming/partial events as in Go)
+  conversationId?: string;
+  messageId?: string;
+  content?: string;
   contentType?: ContentType;
   messageStatus?: MessageStatus;
 
@@ -164,7 +164,71 @@ export interface AssistantResponseEvent {
   codeQuery?: CodeQuery;
 }
 
-// Validation function
+// Convert plain object to AssistantResponseEvent (align with Go FromDict)
+export function assistantResponseEventFromDict(data: Record<string, unknown>): AssistantResponseEvent {
+  const are: AssistantResponseEvent = {};
+
+  if (typeof data.conversationId === "string") are.conversationId = data.conversationId;
+  if (typeof data.messageId === "string") are.messageId = data.messageId;
+  if (typeof data.content === "string") are.content = data.content;
+
+  if (typeof data.contentType === "string") are.contentType = data.contentType as ContentType;
+  if (typeof data.messageStatus === "string") are.messageStatus = data.messageStatus as MessageStatus;
+  if (typeof data.userIntent === "string") are.userIntent = data.userIntent as UserIntent;
+
+  if (Array.isArray(data.supplementaryWebLinks)) {
+    are.supplementaryWebLinks = data.supplementaryWebLinks as SupplementaryWebLink[];
+  }
+  if (Array.isArray(data.references)) {
+    are.references = data.references as Reference[];
+  }
+  if (Array.isArray(data.codeReference)) {
+    are.codeReference = data.codeReference as Reference[];
+  }
+
+  if (data.followupPrompt && typeof data.followupPrompt === "object") {
+    are.followupPrompt = data.followupPrompt as FollowupPrompt;
+  }
+
+  if (data.programmingLanguage && typeof data.programmingLanguage === "object") {
+    are.programmingLanguage = data.programmingLanguage as ProgrammingLanguage;
+  }
+
+  if (Array.isArray(data.customizations)) {
+    are.customizations = data.customizations as Customization[];
+  }
+
+  if (data.codeQuery && typeof data.codeQuery === "object") {
+    are.codeQuery = data.codeQuery as CodeQuery;
+  }
+
+  return are;
+}
+
+// Convert AssistantResponseEvent to plain object (align with Go ToDict)
+export function assistantResponseEventToDict(event: AssistantResponseEvent): Record<string, unknown> {
+  const result: Record<string, unknown> = {};
+
+  if (event.conversationId) result.conversationId = event.conversationId;
+  if (event.messageId) result.messageId = event.messageId;
+  if (event.content !== undefined) result.content = event.content;
+  if (event.contentType) result.contentType = event.contentType;
+  if (event.messageStatus) result.messageStatus = event.messageStatus;
+
+  if (event.supplementaryWebLinks?.length) result.supplementaryWebLinks = event.supplementaryWebLinks;
+  if (event.references?.length) result.references = event.references;
+  if (event.codeReference?.length) result.codeReference = event.codeReference;
+
+  if (event.followupPrompt) result.followupPrompt = event.followupPrompt;
+  if (event.programmingLanguage) result.programmingLanguage = event.programmingLanguage;
+  if (event.customizations?.length) result.customizations = event.customizations;
+  if (event.userIntent) result.userIntent = event.userIntent;
+  if (event.codeQuery) result.codeQuery = event.codeQuery;
+
+  return result;
+}
+
+// Validation function (enhanced to validate enum values like Go's Validate)
 export function validateAssistantResponseEvent(
   event: Partial<AssistantResponseEvent>
 ): boolean {
@@ -181,20 +245,34 @@ export function validateAssistantResponseEvent(
   // Check if has any valid content
   const hasValidContent = !!(event.content ||
     event.codeQuery ||
-    event.supplementaryWebLinks?.length ||
-    event.references?.length ||
-    event.codeReference?.length ||
+    (event.supplementaryWebLinks && event.supplementaryWebLinks.length > 0) ||
+    (event.references && event.references.length > 0) ||
+    (event.codeReference && event.codeReference.length > 0) ||
     event.followupPrompt);
 
-  if (hasValidContent) {
-    return true;
-  }
-
-  // Complete response requires all required fields
   if (!hasValidContent) {
     if (!event.conversationId || !event.messageId) {
       return false;
     }
+  }
+
+  // Enum validations
+  if (event.messageStatus && !["COMPLETED","IN_PROGRESS","ERROR"].includes(event.messageStatus)) {
+    return false;
+  }
+  if (event.contentType && !["text/markdown","text/plain","application/json"].includes(event.contentType)) {
+    return false;
+  }
+  if (event.userIntent && ![
+    "EXPLAIN_CODE_SELECTION",
+    "SUGGEST_ALTERNATE_IMPLEMENTATION",
+    "APPLY_COMMON_BEST_PRACTICES",
+    "IMPROVE_CODE",
+    "SHOW_EXAMPLES",
+    "CITE_SOURCES",
+    "EXPLAIN_LINE_BY_LINE",
+  ].includes(event.userIntent)) {
+    return false;
   }
 
   return true;

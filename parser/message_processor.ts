@@ -4,7 +4,7 @@ import { SessionManager } from "./session_manager.ts";
 import { SonicStreamingJSONAggregator } from "./sonic_streaming_aggregator.ts";
 
 interface EventStreamMessage {
-  headers: Record<string, any>;
+  headers: Record<string, unknown>;
   payload: Uint8Array;
   messageType: string;
   eventType: string;
@@ -296,7 +296,7 @@ export class MessageProcessor {
     }];
   }
 
-  private parsePayload(payload: Uint8Array): any {
+  private parsePayload(payload: Uint8Array): Record<string, unknown> {
     try {
       const text = new TextDecoder().decode(payload);
       return JSON.parse(text);
@@ -305,7 +305,7 @@ export class MessageProcessor {
     }
   }
 
-  private isToolCallEvent(data: any): boolean {
+  private isToolCallEvent(data: Record<string, unknown>): boolean {
     return !!(data.toolUseId || data.tool_use_id || (data.name && data.input));
   }
 

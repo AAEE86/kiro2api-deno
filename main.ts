@@ -1,12 +1,16 @@
 import { AuthService } from "./auth/auth_service.ts";
 import {
-  handleChatCompletions,
   handleMessages,
   handleModels,
   handleTokenStatus,
 } from "./server/handlers.ts";
 import { handleCountTokens } from "./server/count_tokens_handler.ts";
-import { handleOpenAINonStreamRequest, handleOpenAIStreamRequest } from "./server/openai_handlers.ts";
+import { handleOpenAINonStreamRequest } from "./server/openai_handlers.ts";
+import { handleOpenAIStreamRequest } from "./server/openai_stream_processor.ts";
+import { createRequestContext } from "./server/request_context.ts";
+import { openAIToAnthropic } from "./converter/converter.ts";
+import { respondError } from "./server/common.ts";
+import type { OpenAIRequest } from "./types/openai.ts";
 import { requestIDMiddleware, validateAPIKey, requiresAuth, getCORSHeaders } from "./server/middleware.ts";
 import { DEFAULTS } from "./config/constants.ts";
 import * as logger from "./logger/logger.ts";
@@ -29,7 +33,7 @@ function checkAuth(req: Request, clientToken: string): boolean {
 async function serveStaticFile(pathname: string): Promise<Response> {
   try {
     // Remove leading slash and "static/" prefix if present
-    let filePath = pathname.startsWith("/static/") 
+    const filePath = pathname.startsWith("/static/") 
       ? pathname.substring("/static/".length)
       : pathname.substring(1);
     
@@ -61,7 +65,7 @@ async function serveStaticFile(pathname: string): Promise<Response> {
         "Cache-Control": "public, max-age=3600",
       },
     });
-  } catch (error) {
+  } catch {
     logger.debug("Static file not found", logger.String("path", pathname));
     return new Response("Not Found", { status: 404 });
   }
@@ -107,7 +111,26 @@ async function handleRequest(
     } else if (url.pathname === "/v1/messages/count_tokens" && req.method === "POST") {
       response = await handleCountTokens(req);
     } else if (url.pathname === "/v1/chat/completions" && req.method === "POST") {
-      response = await handleChatCompletions(req, authService);
+      // Handle OpenAI format requests using RequestContext
+      const reqCtx = createRequestContext(req, authService, "OpenAI", requestId);
+      const result = await reqCtx.getTokenWithUsageAndBody();
+      
+      // Check for errors
+      if (result.length === 3) {
+        response = result[2]; // Return error response
+      } else {
+        const [tokenWithUsage, body] = result;
+        
+        // Parse OpenAI request
+        const openaiReq: OpenAIRequest = JSON.parse(new TextDecoder().decode(body));
+        const anthropicReq = openAIToAnthropic(openaiReq);
+        
+        if (anthropicReq.stream) {
+          response = await handleOpenAIStreamRequest(openaiReq, tokenWithUsage, requestId);
+        } else {
+          response = await handleOpenAINonStreamRequest(openaiReq, tokenWithUsage.tokenInfo, requestId);
+        }
+      }
     } else if (url.pathname === "/" && req.method === "GET") {
       // Serve the dashboard index page
       response = await serveStaticFile("/index.html");
@@ -131,10 +154,23 @@ async function handleRequest(
       headers,
     });
   } catch (error) {
-    logger.error("请求处理失败", logger.Err(error));
-    return new Response(JSON.stringify({ error: "Internal Server Error" }), {
-      status: 500,
-      headers: { ...corsHeaders, "Content-Type": "application/json" },
+    logger.error(
+      "请求处理失败",
+      logger.String("request_id", requestId),
+      logger.String("path", url.pathname),
+      logger.Err(error),
+    );
+    const errorResponse = respondError("Internal server error", 500);
+    const headers = new Headers(errorResponse.headers);
+    Object.entries(corsHeaders).forEach(([key, value]) => {
+      headers.set(key, value as string);
+    });
+    headers.set("X-Request-ID", requestId);
+    
+    return new Response(errorResponse.body, {
+      status: errorResponse.status,
+      statusText: errorResponse.statusText,
+      headers,
     });
   }
 }

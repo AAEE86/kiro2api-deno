@@ -1,15 +1,14 @@
-import type { AnthropicRequest } from "../types/anthropic.ts";
 import * as logger from "../logger/logger.ts";
 
 // Token计数请求
 interface CountTokensRequest {
   model: string;
-  system?: string | Array<{ type: string; text?: string; cache_control?: any }>;
+  system?: string | Array<{ type: string; text?: string; cache_control?: unknown }>;
   messages: Array<{
     role: string;
-    content: string | Array<{ type: string; text?: string; tool_use_id?: string; content?: any }>;
+    content: string | Array<{ type: string; text?: string; tool_use_id?: string; content?: unknown }>;
   }>;
-  tools?: Array<any>;
+  tools?: Array<unknown>;
 }
 
 // Token计数响应
@@ -25,7 +24,7 @@ class TokenEstimator {
   }
 
   // 估算消息内容token数量
-  estimateMessageContent(content: any): number {
+  estimateMessageContent(content: unknown): number {
     if (typeof content === "string") {
       return this.estimateTextTokens(content);
     }
@@ -57,7 +56,7 @@ class TokenEstimator {
   }
 
   // 估算系统提示token数量
-  estimateSystemTokens(system: any): number {
+  estimateSystemTokens(system: unknown): number {
     if (!system) return 0;
 
     if (typeof system === "string") {
@@ -78,22 +77,23 @@ class TokenEstimator {
   }
 
   // 估算工具定义token数量
-  estimateToolsTokens(tools: any[]): number {
+  estimateToolsTokens(tools: unknown[]): number {
     if (!tools || tools.length === 0) return 0;
 
     let total = 0;
     for (const tool of tools) {
+      const t = tool as Record<string, unknown>;
       // 工具名称
-      if (tool.name) {
-        total += this.estimateTextTokens(tool.name);
+      if (t.name && typeof t.name === "string") {
+        total += this.estimateTextTokens(t.name);
       }
       // 工具描述
-      if (tool.description) {
-        total += this.estimateTextTokens(tool.description);
+      if (t.description && typeof t.description === "string") {
+        total += this.estimateTextTokens(t.description);
       }
       // 工具schema（简化估算）
-      if (tool.input_schema) {
-        const schemaStr = JSON.stringify(tool.input_schema);
+      if (t.input_schema) {
+        const schemaStr = JSON.stringify(t.input_schema);
         total += Math.ceil(schemaStr.length / 4);
       }
       // 结构开销
@@ -125,12 +125,11 @@ class TokenEstimator {
 // 验证Claude模型
 function isValidClaudeModel(model: string): boolean {
   const validModels = [
-    "claude-3-5-sonnet-20241022",
-    "claude-3-5-sonnet-20240620",
+    "claude-sonnet-4-5-20250929",
+    "claude-sonnet-4-20250514",
+    "claude-3-7-sonnet-20250219",
     "claude-3-5-haiku-20241022",
-    "claude-3-opus-20240229",
-    "claude-3-sonnet-20240229",
-    "claude-3-haiku-20240307",
+    "claude-haiku-4-5-20251001",
   ];
   return validModels.includes(model);
 }

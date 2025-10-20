@@ -1,6 +1,8 @@
 // Token管理常量
 export const TOKEN_CACHE_KEY_FORMAT = "token_%d";
 export const TOKEN_REFRESH_CLEANUP_DELAY = 5000; // 5秒（毫秒）
+// 与Go版本一致的Token缓存TTL（5分钟，毫秒）
+export const TOKEN_CACHE_TTL_MS = 5 * 60 * 1000;
 
 // 消息处理常量
 export const MESSAGE_ID_FORMAT = "msg_%s";

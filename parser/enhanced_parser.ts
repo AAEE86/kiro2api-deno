@@ -4,7 +4,7 @@ import { MessageProcessor } from "./message_processor.ts";
 import { SessionInfo } from "./session_manager.ts";
 
 export interface ParseResult {
-  messages: any[];
+  messages: Array<{ headers: Record<string, unknown>; payload: Uint8Array; messageType: string; eventType: string; contentType: string }>;
   events: SSEEvent[];
   toolExecutions: Map<string, ToolExecution>;
   activeTools: Map<string, ToolExecution>;
@@ -22,7 +22,7 @@ export interface ParseSummary {
   hasCompletions: boolean;
   hasErrors: boolean;
   hasSessionEvents: boolean;
-  toolSummary: Record<string, any>;
+  toolSummary: Record<string, unknown>;
 }
 
 export class EnhancedEventStreamParser {
@@ -48,19 +48,26 @@ export class EnhancedEventStreamParser {
     const allEvents: SSEEvent[] = [];
     const errors: Error[] = [];
 
-    for (const message of messages) {
+    for (let i = 0; i < messages.length; i++) {
+      const message = messages[i];
       try {
         const events = this.messageProcessor.processMessage(message);
         allEvents.push(...events);
       } catch (err) {
-        errors.push(err instanceof Error ? err : new Error(String(err)));
+        const error = err instanceof Error ? err : new Error(String(err));
+        console.warn(`Failed to process message ${i}:`, {
+          messageType: message.messageType,
+          eventType: message.eventType,
+          error: error.message,
+        });
+        errors.push(error);
       }
     }
 
     const toolManager = this.messageProcessor.getToolManager();
     const sessionManager = this.messageProcessor.getSessionManager();
 
-    return {
+    const result: ParseResult = {
       messages,
       events: allEvents,
       toolExecutions: toolManager.getCompletedTools(),
@@ -69,6 +76,16 @@ export class EnhancedEventStreamParser {
       summary: this.generateSummary(messages, allEvents, toolManager),
       errors,
     };
+
+    if (errors.length > 0) {
+      console.debug(`Parsing completed with errors:`, {
+        successMessages: messages.length,
+        totalEvents: allEvents.length,
+        errorCount: errors.length,
+      });
+    }
+
+    return result;
   }
 
   parseStream(data: Uint8Array): SSEEvent[] {
@@ -79,8 +96,9 @@ export class EnhancedEventStreamParser {
       try {
         const events = this.messageProcessor.processMessage(message);
         allEvents.push(...events);
-      } catch {
-        // Ignore errors in streaming mode
+      } catch (err) {
+        console.warn(`Streaming message processing failed:`, err);
+        // Continue processing other messages
       }
     }
 
@@ -88,9 +106,9 @@ export class EnhancedEventStreamParser {
   }
 
   private generateSummary(
-    messages: any[],
+    messages: Array<{ headers: Record<string, unknown>; payload: Uint8Array; messageType: string; eventType: string; contentType: string }>,
     events: SSEEvent[],
-    toolManager: any
+    toolManager: { generateToolSummary: () => Record<string, unknown> }
   ): ParseSummary {
     const summary: ParseSummary = {
       totalMessages: messages.length,
@@ -104,10 +122,12 @@ export class EnhancedEventStreamParser {
       toolSummary: {},
     };
 
+    // 统计消息类型 - 更详细的分类
     for (const message of messages) {
       const msgType = message.messageType;
       summary.messageTypes[msgType] = (summary.messageTypes[msgType] || 0) + 1;
 
+      // 检测错误消息
       if (msgType === "error" || msgType === "exception") {
         summary.hasErrors = true;
       }
@@ -116,29 +136,68 @@ export class EnhancedEventStreamParser {
       if (eventType) {
         summary.eventTypes[eventType] = (summary.eventTypes[eventType] || 0) + 1;
 
-        if (eventType.includes("tool") || eventType.includes("Tool")) {
+        // 更精确的事件类型检测（参考 Go 版本）
+        switch (eventType) {
+          case "toolCallRequest":
+          case "toolCallError":
+          case "tool_call_request":
+          case "tool_call_error":
+            summary.hasToolCalls = true;
+            break;
+          case "completion":
+          case "completionChunk":
+          case "completion_chunk":
+            summary.hasCompletions = true;
+            break;
+          case "sessionStart":
+          case "sessionEnd":
+          case "session_start":
+          case "session_end":
+            summary.hasSessionEvents = true;
+            break;
+          case "assistantResponseEvent":
+          case "assistant_response_event":
+            // 旧格式的助手响应事件也算作补全内容
+            summary.hasCompletions = true;
+            break;
+        }
+
+        // 模糊匹配（保持兼容性）
+        if (eventType.toLowerCase().includes("tool")) {
           summary.hasToolCalls = true;
         }
-        if (eventType.includes("completion") || eventType.includes("Completion")) {
+        if (eventType.toLowerCase().includes("completion")) {
           summary.hasCompletions = true;
         }
-        if (eventType.includes("session") || eventType.includes("Session")) {
+        if (eventType.toLowerCase().includes("session")) {
           summary.hasSessionEvents = true;
         }
       }
     }
 
+    // 统计事件类型 - 包括内容块检测
     for (const event of events) {
-      summary.eventTypes[event.event] = (summary.eventTypes[event.event] || 0) + 1;
+      const eventName = event.event;
+      summary.eventTypes[eventName] = (summary.eventTypes[eventName] || 0) + 1;
 
-      if (event.event === "content_block_start" || event.event === "content_block_stop") {
-        const data = event.data as any;
-        if (data?.content_block?.type === "tool_use") {
+      // 检测工具调用相关的内容块
+      if (eventName === "content_block_start" || 
+          eventName === "content_block_stop" ||
+          eventName === "content_block_delta") {
+        const data = event.data as Record<string, unknown>;
+        const contentBlock = data?.content_block as { type?: string } | undefined;
+        if (contentBlock?.type === "tool_use") {
+          summary.hasToolCalls = true;
+        }
+        // 检测 delta 中的工具调用
+        const delta = data?.delta as { type?: string } | undefined;
+        if (delta?.type === "tool_use") {
           summary.hasToolCalls = true;
         }
       }
     }
 
+    // 获取工具执行统计
     summary.toolSummary = toolManager.generateToolSummary();
 
     return summary;
@@ -152,9 +211,10 @@ export class EnhancedEventStreamParser {
     let text = "";
     for (const event of result.events) {
       if (event.event === "content_block_delta") {
-        const data = event.data as any;
-        if (data?.delta?.text) {
-          text += data.delta.text;
+        const data = event.data as Record<string, unknown>;
+        const delta = data?.delta as { text?: string } | undefined;
+        if (delta?.text) {
+          text += delta.text;
         }
       }
     }

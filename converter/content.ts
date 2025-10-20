@@ -1,14 +1,12 @@
-import * as logger from "../logger/logger.ts";
-
 // Process message content to extract text and images
-export function processMessageContent(content: any): {
+export function processMessageContent(content: unknown): {
   text: string;
-  images: any[];
-  toolResults: any[];
+  images: Array<{ format: string; source: { bytes: string } }>;
+  toolResults: Array<{ toolUseId: string; content: unknown[]; status: string; isError: boolean }>;
 } {
   const textParts: string[] = [];
-  const images: any[] = [];
-  const toolResults: any[] = [];
+  const images: Array<{ format: string; source: { bytes: string } }> = [];
+  const toolResults: Array<{ toolUseId: string; content: unknown[]; status: string; isError: boolean }> = [];
 
   if (typeof content === "string") {
     return { text: content, images: [], toolResults: [] };
@@ -41,7 +39,7 @@ export function processMessageContent(content: any): {
           case "tool_result":
             // Extract tool results
             if (block.tool_use_id) {
-              let contentArray: any[] = [];
+              let contentArray: unknown[] = [];
 
               if (block.content !== undefined && block.content !== null) {
                 if (typeof block.content === "string") {
@@ -86,20 +84,21 @@ export function processMessageContent(content: any): {
 }
 
 // Validate image content
-export function validateImageContent(source: any): boolean {
+export function validateImageContent(source: unknown): boolean {
   if (!source || typeof source !== "object") {
     return false;
   }
 
-  if (!source.type || source.type !== "base64") {
+  const src = source as Record<string, unknown>;
+  if (!src.type || src.type !== "base64") {
     return false;
   }
 
-  if (!source.media_type || !source.media_type.startsWith("image/")) {
+  if (!src.media_type || typeof src.media_type !== "string" || !src.media_type.startsWith("image/")) {
     return false;
   }
 
-  if (!source.data || typeof source.data !== "string") {
+  if (!src.data || typeof src.data !== "string") {
     return false;
   }
 
@@ -107,7 +106,7 @@ export function validateImageContent(source: any): boolean {
 }
 
 // Parse tool result content
-export function parseToolResultContent(content: any): string {
+export function parseToolResultContent(content: unknown): string {
   if (typeof content === "string") {
     return content;
   }
@@ -129,8 +128,9 @@ export function parseToolResultContent(content: any): string {
   }
 
   if (typeof content === "object" && content !== null) {
-    if (content.text && typeof content.text === "string") {
-      return content.text;
+    const obj = content as Record<string, unknown>;
+    if (obj.text && typeof obj.text === "string") {
+      return obj.text;
     }
     return JSON.stringify(content);
   }

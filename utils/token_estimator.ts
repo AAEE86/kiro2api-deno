@@ -57,8 +57,8 @@ export class TokenEstimator {
       totalTokens += baseToolsOverhead;
 
       for (const tool of req.tools!) {
-        totalTokens += this.estimateToolName(tool.name);
-        totalTokens += this.estimateTextTokens(tool.description);
+        totalTokens += this.estimateToolName(tool.name || "");
+        totalTokens += this.estimateTextTokens(tool.description || "");
 
         if (tool.input_schema) {
           const jsonBytes = JSON.stringify(tool.input_schema);
@@ -97,9 +97,9 @@ export class TokenEstimator {
   }
 
   private estimateToolName(name: string): number {
-    if (!name) return 0;
+    if (!name || typeof name !== "string") return 0;
 
-    const baseTokens = Math.floor(name.length / 2);
+    const baseTokens = Math.floor(String(name).length / 2);
     const underscoreCount = (name.match(/_/g) || []).length;
     const camelCaseCount = (name.match(/[A-Z]/g) || []).length;
 
@@ -108,9 +108,9 @@ export class TokenEstimator {
   }
 
   estimateTextTokens(text: string): number {
-    if (!text) return 0;
+    if (!text || typeof text !== "string") return 0;
 
-    const runes = Array.from(text);
+    const runes = Array.from(String(text));
     const runeCount = runes.length;
     if (runeCount === 0) return 0;
 
@@ -173,8 +173,10 @@ export class TokenEstimator {
     const blockType = blockMap.type as string;
 
     switch (blockType) {
-      case "text":
-        return this.estimateTextTokens(blockMap.text as string || "");
+      case "text": {
+        const textContent = typeof blockMap.text === "string" ? blockMap.text : "";
+        return this.estimateTextTokens(textContent);
+      }
       case "image":
         return 1500;
       case "document":
@@ -187,7 +189,7 @@ export class TokenEstimator {
       case "tool_result": {
         const content = blockMap.content;
         if (typeof content === "string") {
-          return this.estimateTextTokens(content);
+          return this.estimateTextTokens(content || "");
         } else if (Array.isArray(content)) {
           return content.reduce((sum, item) => sum + this.estimateContentBlock(item), 0);
         }
