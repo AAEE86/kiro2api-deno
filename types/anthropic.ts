@@ -30,7 +30,7 @@ export interface AnthropicRequest {
   model: string;
   max_tokens: number;
   messages: AnthropicRequestMessage[];
-  system?: AnthropicSystemMessage[];
+  system?: string | AnthropicSystemMessage[];
   tools?: AnthropicTool[];
   tool_choice?: string | ToolChoice;
   stream?: boolean;

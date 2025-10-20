@@ -109,13 +109,18 @@ export function anthropicToCodeWhisperer(
   const history: unknown[] = [];
 
   // Add system messages to history if present
-  if (req.system && req.system.length > 0) {
+  if (req.system) {
     const systemContentParts: string[] = [];
-    for (const sysMsg of req.system) {
-      if (typeof sysMsg === "string") {
-        systemContentParts.push(sysMsg);
-      } else if (typeof sysMsg === "object" && sysMsg.type === "text" && sysMsg.text) {
-        systemContentParts.push(sysMsg.text);
+    
+    if (typeof req.system === "string") {
+      systemContentParts.push(req.system);
+    } else if (Array.isArray(req.system)) {
+      for (const sysMsg of req.system) {
+        if (typeof sysMsg === "string") {
+          systemContentParts.push(sysMsg);
+        } else if (typeof sysMsg === "object" && sysMsg.type === "text" && sysMsg.text) {
+          systemContentParts.push(sysMsg.text);
+        }
       }
     }
 

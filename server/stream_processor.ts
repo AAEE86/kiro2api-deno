@@ -1,7 +1,7 @@
 import type { AnthropicRequest } from "../types/anthropic.ts";
 import type { TokenWithUsage } from "../types/common.ts";
 import { TokenEstimator } from "../utils/token_estimator.ts";
-import { CompliantEventStreamParser } from "../parser/compliant_event_stream_parser.ts";
+import { RobustEventStreamParser } from "../parser/robust_parser.ts";
 import { SSEStateManager } from "./sse_state_manager.ts";
 import { StopReasonManager, getStopReasonDescription } from "./stop_reason_manager.ts";
 import { ErrorMapper } from "./error_mapper.ts";
@@ -28,7 +28,7 @@ export class StreamProcessorContext {
   private readonly sseStateManager: SSEStateManager;
   private readonly stopReasonManager: StopReasonManager;
   private readonly tokenEstimator: TokenEstimator;
-  private readonly compliantParser: CompliantEventStreamParser;
+  private readonly binaryParser: RobustEventStreamParser;
 
   // 流处理状态
   public totalOutputTokens = 0;
@@ -38,6 +38,7 @@ export class StreamProcessorContext {
   // 工具调用追踪
   private readonly toolUseIdByBlockIndex = new Map<number, string>();
   private readonly completedToolUseIds = new Set<string>();
+  private textBlockStarted = false;
 
   constructor(
     anthropicReq: AnthropicRequest,
@@ -56,7 +57,7 @@ export class StreamProcessorContext {
     this.sseStateManager = new SSEStateManager(false);
     this.stopReasonManager = new StopReasonManager();
     this.tokenEstimator = new TokenEstimator();
-    this.compliantParser = new CompliantEventStreamParser();
+    this.binaryParser = new RobustEventStreamParser();
   }
 
   /**
@@ -64,11 +65,12 @@ export class StreamProcessorContext {
    */
   cleanup(): void {
     // 清理解析器状态
-    this.compliantParser.reset();
+    this.binaryParser.reset();
 
     // 清理工具调用映射
     this.toolUseIdByBlockIndex.clear();
     this.completedToolUseIds.clear();
+    this.textBlockStarted = false;
   }
 
   /**
@@ -140,16 +142,125 @@ export class StreamProcessorContext {
   }
 
   /**
-   * 处理单个事件
+   * 处理单个AWS EventStream消息
    */
-  processEvent(
-    event: { data: unknown },
+  processMessage(
+    message: { payload: Uint8Array },
     controller: ReadableStreamDefaultController,
     encoder: TextEncoder,
   ): void {
-    const dataMap = event.data as Record<string, unknown>;
-    if (!dataMap) return;
+    // 解析 payload 获取事件数据
+    let event: Record<string, unknown>;
+    try {
+      const payload = JSON.parse(new TextDecoder().decode(message.payload));
+      event = payload.assistantResponseEvent || payload;
+    } catch {
+      return;
+    }
 
+    // 将 CodeWhisperer 事件转换为 Anthropic SSE 格式
+    const anthropicEvents = this.convertToAnthropicEvents(event);
+    
+    // 发送转换后的事件
+    for (const dataMap of anthropicEvents) {
+      this.processAnthropicEvent(dataMap, controller, encoder);
+    }
+  }
+
+  /**
+   * 将 CodeWhisperer 事件转换为 Anthropic SSE 事件
+   */
+  private convertToAnthropicEvents(event: Record<string, unknown>): Array<Record<string, unknown>> {
+    const events: Array<Record<string, unknown>> = [];
+    
+    // 处理文本内容
+    if (event.content && typeof event.content === "string") {
+      // 如果文本块还没开始，先发送 content_block_start
+      if (!this.textBlockStarted) {
+        events.push({
+          type: "content_block_start",
+          index: 0,
+          content_block: {
+            type: "text",
+            text: "",
+          },
+        });
+        this.textBlockStarted = true;
+      }
+      
+      events.push({
+        type: "content_block_delta",
+        index: 0,
+        delta: {
+          type: "text_delta",
+          text: event.content,
+        },
+      });
+    }
+    
+    // 处理工具调用
+    if (event.toolUseId && event.name) {
+      const toolUseId = event.toolUseId as string;
+      const toolName = event.name as string;
+      
+      // 获取或分配块索引
+      let blockIndex = -1;
+      for (const [index, id] of this.toolUseIdByBlockIndex.entries()) {
+        if (id === toolUseId) {
+          blockIndex = index;
+          break;
+        }
+      }
+      
+      // 如果是新工具，生成 content_block_start
+      if (blockIndex === -1) {
+        blockIndex = this.toolUseIdByBlockIndex.size + 1;
+        this.toolUseIdByBlockIndex.set(blockIndex, toolUseId);
+        
+        events.push({
+          type: "content_block_start",
+          index: blockIndex,
+          content_block: {
+            type: "tool_use",
+            id: toolUseId,
+            name: toolName,
+            input: {},
+          },
+        });
+      }
+      
+      // 处理工具参数增量
+      if (event.input && typeof event.input === "string") {
+        events.push({
+          type: "content_block_delta",
+          index: blockIndex,
+          delta: {
+            type: "input_json_delta",
+            partial_json: event.input,
+          },
+        });
+      }
+      
+      // 处理工具结束
+      if (event.stop) {
+        events.push({
+          type: "content_block_stop",
+          index: blockIndex,
+        });
+      }
+    }
+    
+    return events;
+  }
+
+  /**
+   * 处理单个 Anthropic 事件
+   */
+  processAnthropicEvent(
+    dataMap: Record<string, unknown>,
+    controller: ReadableStreamDefaultController,
+    encoder: TextEncoder,
+  ): void {
     const eventType = dataMap.type as string;
 
     // 处理不同类型的事件
@@ -228,6 +339,15 @@ export class StreamProcessorContext {
   sendFinalEvents(controller: ReadableStreamDefaultController): void {
     const encoder = new TextEncoder();
 
+    // 关闭文本块（如果已启动）
+    if (this.textBlockStarted) {
+      const stopEvent = { type: "content_block_stop", index: 0 };
+      const validation = this.sseStateManager.validateAndSend(stopEvent);
+      if (validation.valid) {
+        controller.enqueue(encoder.encode(`data: ${JSON.stringify(stopEvent)}\n\n`));
+      }
+    }
+
     // 关闭所有未关闭的content_block
     for (const [index, block] of this.sseStateManager.getActiveBlocks().entries()) {
       if (block.started && !block.stopped) {
@@ -288,21 +408,20 @@ export class StreamProcessorContext {
     reader: ReadableStreamDefaultReader<Uint8Array>,
     controller: ReadableStreamDefaultController,
   ): Promise<void> {
-    const decoder = new TextDecoder();
     const encoder = new TextEncoder();
 
     while (true) {
       const { done, value } = await reader.read();
       if (done) break;
 
-      const chunk = decoder.decode(value, { stream: true });
       this.totalReadBytes += value.length;
 
-      const { events } = this.compliantParser.parseStream(chunk);
-      this.totalProcessedEvents += events.length;
+      // 直接解析二进制 AWS EventStream 格式
+      const messages = this.binaryParser.parseStream(value);
+      this.totalProcessedEvents += messages.length;
 
-      for (const event of events) {
-        this.processEvent(event, controller, encoder);
+      for (const message of messages) {
+        this.processMessage(message, controller, encoder);
       }
     }
 
@@ -310,7 +429,7 @@ export class StreamProcessorContext {
       "响应流结束",
       logger.String("request_id", this.requestId),
       logger.Int("total_read_bytes", this.totalReadBytes),
-      logger.Int("total_events", this.totalProcessedEvents),
+      logger.Int("total_messages", this.totalProcessedEvents),
     );
   }
 }
@@ -328,7 +447,11 @@ export function handleStreamRequest(
 
   // 计算输入tokens
   const estimator = new TokenEstimator();
-  const systemMessages = anthropicReq.system?.map(s => ({ text: typeof s === "string" ? s : s.text }));
+  const systemMessages = anthropicReq.system
+    ? typeof anthropicReq.system === "string"
+      ? [{ text: anthropicReq.system }]
+      : anthropicReq.system.map(s => ({ text: typeof s === "string" ? s : s.text }))
+    : undefined;
   const inputTokens = estimator.estimateTokens({
     system: systemMessages,
     messages: anthropicReq.messages,

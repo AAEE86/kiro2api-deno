@@ -113,7 +113,11 @@ async function handleNonStreamRequest(
 
   // Calculate input tokens using TokenEstimator
   const estimator = new TokenEstimator();
-  const systemMessages = anthropicReq.system?.map(s => ({ text: typeof s === "string" ? s : s.text }));
+  const systemMessages = anthropicReq.system
+    ? typeof anthropicReq.system === "string"
+      ? [{ text: anthropicReq.system }]
+      : anthropicReq.system.map(s => ({ text: typeof s === "string" ? s : s.text }))
+    : undefined;
   const inputTokens = estimator.estimateTokens({
     system: systemMessages,
     messages: anthropicReq.messages,

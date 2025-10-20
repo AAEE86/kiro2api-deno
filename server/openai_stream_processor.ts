@@ -3,7 +3,7 @@ import type { TokenWithUsage } from "../types/common.ts";
 import { openAIToAnthropic } from "../converter/converter.ts";
 import { anthropicToCodeWhisperer } from "../converter/converter.ts";
 import { AWS_ENDPOINTS } from "../config/constants.ts";
-import { CompliantEventStreamParser } from "../parser/compliant_event_stream_parser.ts";
+import { RobustEventStreamParser } from "../parser/robust_parser.ts";
 import * as logger from "../logger/logger.ts";
 
 /**
@@ -23,7 +23,7 @@ export class OpenAIStreamProcessorContext {
   public readonly requestId: string;
 
   // 流解析器
-  private readonly compliantParser: CompliantEventStreamParser;
+  private readonly binaryParser: RobustEventStreamParser;
 
   // 工具调用映射
   private readonly toolIndexByToolUseId = new Map<string, number>();
@@ -43,14 +43,14 @@ export class OpenAIStreamProcessorContext {
     this.tokenWithUsage = tokenWithUsage;
     this.requestId = requestId;
     this.messageId = `chatcmpl-${Date.now()}`;
-    this.compliantParser = new CompliantEventStreamParser();
+    this.binaryParser = new RobustEventStreamParser();
   }
 
   /**
    * 清理资源
    */
   cleanup(): void {
-    this.compliantParser.reset();
+    this.binaryParser.reset();
     this.toolIndexByToolUseId.clear();
     this.toolUseIdByBlockIndex.clear();
   }
@@ -80,104 +80,26 @@ export class OpenAIStreamProcessorContext {
   }
 
   /**
-   * 处理单个Anthropic事件并转换为OpenAI格式
+   * 处理单个AWS EventStream消息并转换为OpenAI格式
    */
-  processEvent(
-    event: { data: unknown },
+  processMessage(
+    message: { payload: Uint8Array },
     controller: ReadableStreamDefaultController,
     encoder: TextEncoder,
   ): void {
-    const dataMap = event.data as Record<string, unknown>;
-    if (!dataMap) return;
-
-    const eventType = dataMap.type as string;
-
-    switch (eventType) {
-      case "content_block_start":
-        this.handleContentBlockStart(dataMap, controller, encoder);
-        break;
-
-      case "content_block_delta":
-        this.handleContentBlockDelta(dataMap, controller, encoder);
-        break;
-
-      case "content_block_stop":
-        // OpenAI不需要显式的stop事件
-        break;
-
-      case "message_delta":
-      case "message_stop":
-        // 这些事件在sendFinalEvent中统一处理
-        break;
-    }
-
-    this.totalProcessedEvents++;
-  }
-
-  /**
-   * 处理content_block_start事件
-   */
-  private handleContentBlockStart(
-    dataMap: Record<string, unknown>,
-    controller: ReadableStreamDefaultController,
-    encoder: TextEncoder,
-  ): void {
-    const contentBlock = dataMap.content_block as Record<string, unknown>;
-    if (!contentBlock || contentBlock.type !== "tool_use") {
+    // 解析 payload
+    let event: Record<string, unknown>;
+    try {
+      const payload = JSON.parse(new TextDecoder().decode(message.payload));
+      event = payload.assistantResponseEvent || payload;
+    } catch {
       return;
     }
 
-    const toolUseId = contentBlock.id as string;
-    const toolName = contentBlock.name as string;
-    const blockIndex = dataMap.index as number;
+    const eventType = event.type as string;
 
-    // 分配工具索引
-    if (!this.toolIndexByToolUseId.has(toolUseId)) {
-      this.toolIndexByToolUseId.set(toolUseId, this.nextToolIndex);
-      this.nextToolIndex++;
-    }
-    this.toolUseIdByBlockIndex.set(blockIndex, toolUseId);
-    this.sawToolUse = true;
-
-    const toolIdx = this.toolIndexByToolUseId.get(toolUseId)!;
-
-    // 发送工具调用开始事件
-    const toolStart = {
-      id: this.messageId,
-      object: "chat.completion.chunk",
-      created: Math.floor(Date.now() / 1000),
-      model: this.openaiReq.model,
-      choices: [{
-        index: 0,
-        delta: {
-          tool_calls: [{
-            index: toolIdx,
-            id: toolUseId,
-            type: "function",
-            function: { name: toolName, arguments: "" },
-          }],
-        },
-        finish_reason: null,
-      }],
-    };
-    controller.enqueue(encoder.encode(`data: ${JSON.stringify(toolStart)}\n\n`));
-  }
-
-  /**
-   * 处理content_block_delta事件
-   */
-  private handleContentBlockDelta(
-    dataMap: Record<string, unknown>,
-    controller: ReadableStreamDefaultController,
-    encoder: TextEncoder,
-  ): void {
-    const delta = dataMap.delta as Record<string, unknown>;
-    if (!delta) return;
-
-    const deltaType = delta.type as string;
-
-    if (deltaType === "text_delta" && delta.text) {
-      // 文本内容增量
+    // 处理文本内容
+    if (event.content) {
       const contentEvent = {
         id: this.messageId,
         object: "chat.completion.chunk",
@@ -185,17 +107,50 @@ export class OpenAIStreamProcessorContext {
         model: this.openaiReq.model,
         choices: [{
           index: 0,
-          delta: { content: delta.text },
+          delta: { content: event.content },
           finish_reason: null,
         }],
       };
       controller.enqueue(encoder.encode(`data: ${JSON.stringify(contentEvent)}\n\n`));
-    } else if (deltaType === "input_json_delta" && delta.partial_json) {
-      // 工具参数JSON增量
-      const blockIndex = dataMap.index as number;
-      const toolUseId = this.toolUseIdByBlockIndex.get(blockIndex);
+    }
+
+    // 处理工具调用
+    if (event.toolUseId && event.name) {
+      const toolUseId = event.toolUseId as string;
+      const toolName = event.name as string;
       
-      if (toolUseId) {
+      // 分配工具索引
+      if (!this.toolIndexByToolUseId.has(toolUseId)) {
+        this.toolIndexByToolUseId.set(toolUseId, this.nextToolIndex);
+        this.nextToolIndex++;
+        this.sawToolUse = true;
+        
+        const toolIdx = this.toolIndexByToolUseId.get(toolUseId)!;
+        
+        // 发送工具调用开始
+        const toolStart = {
+          id: this.messageId,
+          object: "chat.completion.chunk",
+          created: Math.floor(Date.now() / 1000),
+          model: this.openaiReq.model,
+          choices: [{
+            index: 0,
+            delta: {
+              tool_calls: [{
+                index: toolIdx,
+                id: toolUseId,
+                type: "function",
+                function: { name: toolName, arguments: "" },
+              }],
+            },
+            finish_reason: null,
+          }],
+        };
+        controller.enqueue(encoder.encode(`data: ${JSON.stringify(toolStart)}\n\n`));
+      }
+      
+      // 处理工具参数
+      if (event.input && typeof event.input === "string") {
         const toolIdx = this.toolIndexByToolUseId.get(toolUseId);
         if (toolIdx !== undefined) {
           const toolDelta = {
@@ -208,7 +163,7 @@ export class OpenAIStreamProcessorContext {
               delta: {
                 tool_calls: [{
                   index: toolIdx,
-                  function: { arguments: delta.partial_json },
+                  function: { arguments: event.input },
                 }],
               },
               finish_reason: null,
@@ -218,7 +173,10 @@ export class OpenAIStreamProcessorContext {
         }
       }
     }
+
+    this.totalProcessedEvents++;
   }
+
 
   /**
    * 发送结束事件
@@ -256,18 +214,17 @@ export class OpenAIStreamProcessorContext {
     reader: ReadableStreamDefaultReader<Uint8Array>,
     controller: ReadableStreamDefaultController,
   ): Promise<void> {
-    const decoder = new TextDecoder();
     const encoder = new TextEncoder();
 
     while (true) {
       const { done, value } = await reader.read();
       if (done) break;
 
-      const chunk = decoder.decode(value, { stream: true });
-      const { events } = this.compliantParser.parseStream(chunk);
+      // 直接解析二进制数据
+      const messages = this.binaryParser.parseStream(value);
 
-      for (const event of events) {
-        this.processEvent(event, controller, encoder);
+      for (const message of messages) {
+        this.processMessage(message, controller, encoder);
       }
     }
   }

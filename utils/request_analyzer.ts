@@ -9,7 +9,7 @@ interface AnthropicRequest {
   max_tokens?: number;
   messages: Array<{ content: unknown }>;
   tools?: unknown[];
-  system?: Array<{ text: string }>;
+  system?: string | Array<{ text: string }>;
 }
 
 export function analyzeRequestComplexity(req: AnthropicRequest): RequestComplexity {
@@ -42,8 +42,10 @@ export function analyzeRequestComplexity(req: AnthropicRequest): RequestComplexi
   }
 
   // 4. Check system prompt
-  if (req.system && req.system.length > 0) {
-    const systemContent = req.system.map(s => s.text).join("");
+  if (req.system) {
+    const systemContent = typeof req.system === "string"
+      ? req.system
+      : req.system.map(s => s.text).join("");
     if (systemContent.length > 2000) {
       complexityScore += 1;
     }
