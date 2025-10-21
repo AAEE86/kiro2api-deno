@@ -1,20 +1,25 @@
 import type { AnthropicRequest } from "../types/anthropic.ts";
 import type { TokenWithUsage } from "../types/common.ts";
 import { TokenEstimator } from "../utils/token_estimator.ts";
-import { RobustEventStreamParser } from "../parser/robust_parser.ts";
 import { SSEStateManager } from "./sse_state_manager.ts";
 import { StopReasonManager, getStopReasonDescription } from "./stop_reason_manager.ts";
 import { ErrorMapper } from "./error_mapper.ts";
 import * as logger from "../logger/logger.ts";
+import { TimeoutError } from "../config/timeout.ts";
+import { StreamEventConverter } from "./stream_event_converter.ts";
+import { StreamTokenManager } from "./stream_token_manager.ts";
+import { StreamTimeoutController } from "./stream_timeout_controller.ts";
+import { StreamBufferProcessor } from "./stream_buffer_processor.ts";
 
 /**
- * 流处理器上下文
+ * 流处理器上下文（重构版）
  * 封装流式请求处理的所有状态
- * 
- * 设计原则：
- * 1. 单一职责：专注于流式数据处理
- * 2. 状态封装：所有处理状态统一管理
- * 3. 生命周期管理：完整的cleanup机制
+ *
+ * 重构改进：
+ * 1. 职责分离：将大类拆分为多个专门的管理器
+ * 2. 代码复用：提取公共逻辑到独立类
+ * 3. 性能优化：使用增量解析和缓冲区复用
+ * 4. 可测试性：每个管理器可独立测试
  */
 export class StreamProcessorContext {
   // 请求信息
@@ -24,21 +29,16 @@ export class StreamProcessorContext {
   public readonly requestId: string;
   public readonly inputTokens: number;
 
-  // 状态管理器
+  // 专门的管理器（职责分离）
   private readonly sseStateManager: SSEStateManager;
   private readonly stopReasonManager: StopReasonManager;
-  private readonly tokenEstimator: TokenEstimator;
-  private readonly binaryParser: RobustEventStreamParser;
-
-  // 流处理状态
-  public totalOutputTokens = 0;
-  public totalReadBytes = 0;
-  public totalProcessedEvents = 0;
+  private readonly eventConverter: StreamEventConverter;
+  private readonly tokenManager: StreamTokenManager;
+  private readonly timeoutController: StreamTimeoutController;
+  private readonly bufferProcessor: StreamBufferProcessor;
 
   // 工具调用追踪
-  private readonly toolUseIdByBlockIndex = new Map<number, string>();
   private readonly completedToolUseIds = new Set<string>();
-  private textBlockStarted = false;
 
   constructor(
     anthropicReq: AnthropicRequest,
@@ -53,24 +53,25 @@ export class StreamProcessorContext {
     this.requestId = requestId;
     this.inputTokens = inputTokens;
 
-    // 初始化管理器
+    // 初始化所有管理器
     this.sseStateManager = new SSEStateManager(false);
     this.stopReasonManager = new StopReasonManager();
-    this.tokenEstimator = new TokenEstimator();
-    this.binaryParser = new RobustEventStreamParser();
+    this.eventConverter = new StreamEventConverter();
+    this.tokenManager = new StreamTokenManager();
+    this.timeoutController = new StreamTimeoutController();
+    this.bufferProcessor = new StreamBufferProcessor();
   }
 
   /**
-   * 清理资源
+   * 清理资源（重构版）
    */
   cleanup(): void {
-    // 清理解析器状态
-    this.binaryParser.reset();
-
-    // 清理工具调用映射
-    this.toolUseIdByBlockIndex.clear();
+    // 清理所有管理器
+    this.bufferProcessor.reset();
+    this.eventConverter.reset();
+    this.tokenManager.reset();
+    this.timeoutController.cleanup();
     this.completedToolUseIds.clear();
-    this.textBlockStarted = false;
   }
 
   /**
@@ -126,7 +127,7 @@ export class StreamProcessorContext {
     const toolId = contentBlock.id as string;
 
     if (toolId) {
-      this.toolUseIdByBlockIndex.set(index, toolId);
+      this.eventConverter.getToolUseIdByBlockIndex().set(index, toolId);
       logger.debug(
         "转发tool_use开始",
         logger.String("request_id", this.requestId),
@@ -142,12 +143,12 @@ export class StreamProcessorContext {
    */
   private processToolUseStop(dataMap: Record<string, unknown>): void {
     const index = dataMap.index as number;
-    const toolId = this.toolUseIdByBlockIndex.get(index);
+    const toolId = this.eventConverter.getToolUseIdByBlockIndex().get(index);
 
     if (toolId) {
       // 关键：先记录到完成集合，再删除映射
       this.completedToolUseIds.add(toolId);
-      this.toolUseIdByBlockIndex.delete(index);
+      this.eventConverter.getToolUseIdByBlockIndex().delete(index);
     }
   }
 
@@ -175,7 +176,7 @@ export class StreamProcessorContext {
     }
 
     // 将 CodeWhisperer 事件转换为 Anthropic SSE 格式
-    const anthropicEvents = this.convertToAnthropicEvents(event);
+    const anthropicEvents = this.eventConverter.convertToAnthropicEvents(event);
     
     // 发送转换后的事件
     for (const dataMap of anthropicEvents) {
@@ -185,91 +186,6 @@ export class StreamProcessorContext {
     return false;
   }
 
-  /**
-   * 将 CodeWhisperer 事件转换为 Anthropic SSE 事件
-   */
-  private convertToAnthropicEvents(event: Record<string, unknown>): Array<Record<string, unknown>> {
-    const events: Array<Record<string, unknown>> = [];
-    
-    // 处理文本内容
-    if (event.content && typeof event.content === "string") {
-      // 如果文本块还没开始，先发送 content_block_start
-      if (!this.textBlockStarted) {
-        events.push({
-          type: "content_block_start",
-          index: 0,
-          content_block: {
-            type: "text",
-            text: "",
-          },
-        });
-        this.textBlockStarted = true;
-      }
-      
-      events.push({
-        type: "content_block_delta",
-        index: 0,
-        delta: {
-          type: "text_delta",
-          text: event.content,
-        },
-      });
-    }
-    
-    // 处理工具调用
-    if (event.toolUseId && event.name) {
-      const toolUseId = event.toolUseId as string;
-      const toolName = event.name as string;
-      
-      // 获取或分配块索引
-      let blockIndex = -1;
-      for (const [index, id] of this.toolUseIdByBlockIndex.entries()) {
-        if (id === toolUseId) {
-          blockIndex = index;
-          break;
-        }
-      }
-      
-      // 如果是新工具，生成 content_block_start
-      if (blockIndex === -1) {
-        blockIndex = this.toolUseIdByBlockIndex.size + 1;
-        this.toolUseIdByBlockIndex.set(blockIndex, toolUseId);
-        
-        events.push({
-          type: "content_block_start",
-          index: blockIndex,
-          content_block: {
-            type: "tool_use",
-            id: toolUseId,
-            name: toolName,
-            input: {},
-          },
-        });
-      }
-      
-      // 处理工具参数增量
-      if (event.input && typeof event.input === "string") {
-        events.push({
-          type: "content_block_delta",
-          index: blockIndex,
-          delta: {
-            type: "input_json_delta",
-            partial_json: event.input,
-          },
-        });
-      }
-      
-      // 处理工具结束
-      if (event.stop) {
-        events.push({
-          type: "content_block_stop",
-          index: blockIndex,
-        });
-      }
-    }
-    
-    return events;
-  }
 
   /**
    * 处理单个 Anthropic 事件
@@ -308,7 +224,7 @@ export class StreamProcessorContext {
     }
 
     // 累计token（基于实际发送的内容）
-    this.accumulateTokens(dataMap);
+    this.tokenManager.accumulateTokens(dataMap);
   }
 
   /**
@@ -362,7 +278,7 @@ export class StreamProcessorContext {
           stop_sequence: null,
         },
         usage: {
-          output_tokens: Math.max(1, this.totalOutputTokens),
+          output_tokens: Math.max(1, this.tokenManager.getTotalOutputTokens()),
         },
       };
 
@@ -395,50 +311,6 @@ export class StreamProcessorContext {
     return false;
   }
 
-  /**
-   * 累计token数
-   */
-  private accumulateTokens(dataMap: Record<string, unknown>): void {
-    const eventType = dataMap.type as string;
-
-    switch (eventType) {
-      case "content_block_delta": {
-        const delta = dataMap.delta as Record<string, unknown>;
-        if (!delta) break;
-
-        const deltaType = delta.type as string;
-        if (deltaType === "text_delta" && delta.text) {
-          // 文本内容增量
-          this.totalOutputTokens += this.tokenEstimator.estimateTextTokens(
-            delta.text as string,
-          );
-        } else if (deltaType === "input_json_delta" && delta.partial_json) {
-          // 工具调用参数JSON增量
-          const jsonText = delta.partial_json as string;
-          this.totalOutputTokens += Math.ceil(jsonText.length / 4);
-        }
-        break;
-      }
-
-      case "content_block_start": {
-        const contentBlock = dataMap.content_block as Record<string, unknown>;
-        if (!contentBlock) break;
-
-        const blockType = contentBlock.type as string;
-        if (blockType === "tool_use") {
-          // 工具调用结构开销：12 tokens (type+id+name)
-          this.totalOutputTokens += 12;
-          
-          // 工具名称token
-          const toolName = contentBlock.name as string;
-          if (toolName) {
-            this.totalOutputTokens += this.tokenEstimator.estimateTextTokens(toolName);
-          }
-        }
-        break;
-      }
-    }
-  }
 
   /**
    * 发送结束事件
@@ -447,7 +319,7 @@ export class StreamProcessorContext {
     const encoder = new TextEncoder();
 
     // 关闭文本块（如果已启动）
-    if (this.textBlockStarted) {
+    if (this.eventConverter.isTextBlockStarted()) {
       const stopEvent = { type: "content_block_stop", index: 0 };
       const validation = this.sseStateManager.validateAndSend(stopEvent);
       if (validation.valid) {
@@ -477,13 +349,13 @@ export class StreamProcessorContext {
     }
 
     // 更新工具调用状态
-    const hasActiveTools = this.toolUseIdByBlockIndex.size > 0;
+    const hasActiveTools = this.eventConverter.getToolUseIdByBlockIndex().size > 0;
     const hasCompletedTools = this.completedToolUseIds.size > 0;
 
     this.stopReasonManager.updateToolCallStatus(hasActiveTools, hasCompletedTools);
 
     // 最小token保护
-    let outputTokens = this.totalOutputTokens;
+    let outputTokens = this.tokenManager.getTotalOutputTokens();
     if (outputTokens < 1 && (hasActiveTools || hasCompletedTools)) {
       outputTokens = 1;
     }
@@ -528,6 +400,7 @@ export class StreamProcessorContext {
     }
   }
 
+
   /**
    * 处理事件流
    */
@@ -538,40 +411,64 @@ export class StreamProcessorContext {
     const encoder = new TextEncoder();
     let shouldTerminate = false;
 
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
+    try {
+      while (true) {
+        // 检查超时
+        this.timeoutController.checkTimeouts();
 
-      this.totalReadBytes += value.length;
+        // 带超时的读取
+        const { done, value } = await this.timeoutController.readWithTimeout(reader);
+        
+        // 清除读取超时定时器
+        this.timeoutController.clearReadTimeout();
 
-      // 直接解析二进制 AWS EventStream 格式
-      const messages = this.binaryParser.parseStream(value);
-      this.totalProcessedEvents += messages.length;
+        if (done) break;
 
-      for (const message of messages) {
-        shouldTerminate = this.processMessage(message, controller, encoder);
+        // 更新读取时间和字节数
+        this.timeoutController.updateReadStats(value.length);
+
+        // 使用优化的缓冲处理器解析
+        const messages = this.bufferProcessor.processChunk(value);
+
+        for (const message of messages) {
+          shouldTerminate = this.processMessage(message, controller, encoder);
+          if (shouldTerminate) {
+            logger.info(
+              "检测到终止信号，停止流处理",
+              logger.String("request_id", this.requestId),
+            );
+            break;
+          }
+        }
+
+        // 如果检测到终止信号，跳出读取循环
         if (shouldTerminate) {
-          logger.info(
-            "检测到终止信号，停止流处理",
-            logger.String("request_id", this.requestId),
-          );
           break;
         }
       }
 
-      // 如果检测到终止信号，跳出读取循环
-      if (shouldTerminate) {
-        break;
+      const stats = this.timeoutController.getStats();
+      logger.debug(
+        "响应流结束",
+        logger.String("request_id", this.requestId),
+        logger.Int("total_read_bytes", stats.totalReadBytes),
+        logger.Int("total_messages", this.bufferProcessor.getTotalProcessedEvents()),
+        logger.Int("duration_ms", stats.elapsed),
+        logger.Bool("terminated_by_exception", shouldTerminate),
+      );
+    } catch (error) {
+      if (error instanceof TimeoutError) {
+        logger.error(
+          "流处理超时",
+          logger.String("request_id", this.requestId),
+          logger.String("timeout_type", error.timeoutType),
+          logger.Int("elapsed_ms", this.timeoutController.getStats().elapsed),
+          logger.Int("total_bytes", this.timeoutController.getStats().totalReadBytes),
+          logger.Err(error),
+        );
       }
+      throw error;
     }
-
-    logger.debug(
-      "响应流结束",
-      logger.String("request_id", this.requestId),
-      logger.Int("total_read_bytes", this.totalReadBytes),
-      logger.Int("total_messages", this.totalProcessedEvents),
-      logger.Bool("terminated_by_exception", shouldTerminate),
-    );
   }
 }
 

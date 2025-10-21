@@ -21,7 +21,7 @@ const levelNames: Record<Level, string> = {
 
 interface Field {
   key: string;
-  value: unknown;
+  value: unknown | (() => unknown);
 }
 
 interface LogEntry {
@@ -154,6 +154,7 @@ class Logger {
     }
 
     // Add custom fields, skip system fields
+    // 使用懒加载：只有在需要时才计算字段值
     const systemFields = new Set([
       "level",
       "log_level",
@@ -166,7 +167,10 @@ class Logger {
 
     for (const field of fields) {
       if (!systemFields.has(field.key)) {
-        entry[field.key] = field.value;
+        // 懒加载：如果 value 是函数，则调用它获取实际值
+        entry[field.key] = typeof field.value === "function" 
+          ? (field.value as () => unknown)() 
+          : field.value;
       }
     }
 
@@ -293,6 +297,41 @@ export function Duration(key: string, val: number): Field {
 
 export function Any(key: string, val: unknown): Field {
   return { key, value: val };
+}
+
+/**
+ * 懒加载字段构造器
+ * 只有在日志级别满足时才会计算字段值
+ * 适用于性能敏感的计算，如 JSON.stringify、复杂对象序列化等
+ */
+
+/**
+ * 懒加载字符串字段
+ */
+export function LazyString(key: string, fn: () => string): Field {
+  return { key, value: fn };
+}
+
+/**
+ * 懒加载数字字段
+ */
+export function LazyInt(key: string, fn: () => number): Field {
+  return { key, value: fn };
+}
+
+/**
+ * 懒加载任意类型字段
+ */
+export function LazyAny(key: string, fn: () => unknown): Field {
+  return { key, value: fn };
+}
+
+/**
+ * 懒加载 JSON 序列化
+ * 适用于复杂对象，避免在不需要时进行序列化
+ */
+export function LazyJson(key: string, obj: unknown): Field {
+  return { key, value: () => JSON.stringify(obj) };
 }
 
 // Global default logger

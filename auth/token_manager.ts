@@ -3,6 +3,8 @@ import type { TokenInfo, TokenWithUsage } from "../types/common.ts";
 import { refreshToken } from "./refresh.ts";
 import * as logger from "../logger/logger.ts";
 import { UsageLimitsChecker, calculateAvailableCount } from "./usage_checker.ts";
+import { createTokenPreview, maskEmail, maskClientId } from "../utils/privacy.ts";
+import { TOKEN_CACHE_CONFIG } from "../config/cache.ts";
 
 interface TokenCache {
   token: TokenInfo;
@@ -21,8 +23,9 @@ export class TokenManager {
   private refreshLocks: Map<number, Promise<TokenInfo>> = new Map();
   
   // 缓存清理配置
-  private readonly CACHE_TTL_MS = 24 * 60 * 60 * 1000; // 24小时
-  private readonly CLEANUP_INTERVAL_MS = 60 * 60 * 1000; // 1小时
+  private readonly CACHE_TTL_MS = TOKEN_CACHE_CONFIG.TTL_MS;
+  private readonly CLEANUP_INTERVAL_MS = TOKEN_CACHE_CONFIG.CLEANUP_INTERVAL_MS;
+  private readonly EXPIRY_BUFFER_MS = TOKEN_CACHE_CONFIG.EXPIRY_BUFFER_MS;
   private cleanupTimer?: number;
 
   constructor(configs: AuthConfig[]) {
@@ -79,18 +82,52 @@ export class TokenManager {
   /**
    * 停止缓存清理任务并清理所有资源
    * 用于优雅关闭
+   *
+   * 改进点：
+   * 1. 添加了更彻底的资源清理
+   * 2. 防止重复调用
+   * 3. 确保所有引用都被释放
    */
+  private isDestroyed = false;
+  
   public destroy(): void {
+    // 防止重复调用
+    if (this.isDestroyed) {
+      logger.debug("TokenManager 已经被销毁，跳过重复调用");
+      return;
+    }
+    
+    this.isDestroyed = true;
+    
+    // 清理定时器
     if (this.cleanupTimer !== undefined) {
       clearInterval(this.cleanupTimer);
       this.cleanupTimer = undefined;
     }
     
-    this.tokenCache.clear();
+    // 清理所有缓存和锁
+    // 先清理 refreshLocks 中的 Promise 引用
+    for (const [key, promise] of this.refreshLocks.entries()) {
+      // 尝试取消正在进行的刷新操作
+      promise.catch(() => {
+        // 忽略错误，只是为了确保 Promise 被处理
+      });
+    }
     this.refreshLocks.clear();
+    
+    // 清理 token 缓存
+    this.tokenCache.clear();
+    
+    // 清理耗尽集合
     this.exhausted.clear();
     
-    logger.info("TokenManager 资源已清理");
+    // 重置索引
+    this.currentIndex = 0;
+    
+    // 清理配置引用（如果配置很大）
+    // 注意：这里不清理 configs，因为可能还需要用于重新初始化
+    
+    logger.info("TokenManager 资源已完全清理");
   }
 
   // Warm up all tokens by refreshing them
@@ -318,12 +355,11 @@ export class TokenManager {
     }
   }
 
-  // Check if token is expired (with 5 minute buffer)
+  // Check if token is expired (with buffer from config)
   private isTokenExpired(token: TokenInfo): boolean {
     if (!token.expiresAt) return false;
     const now = new Date();
-    const bufferMs = 5 * 60 * 1000; // 5 minutes
-    return now.getTime() >= token.expiresAt.getTime() - bufferMs;
+    return now.getTime() >= token.expiresAt.getTime() - this.EXPIRY_BUFFER_MS;
   }
 
   // Get token pool status - matching Go version implementation
@@ -343,7 +379,7 @@ export class TokenManager {
         tokenList.push({
           index: i,
           user_email: "未获取",
-          token_preview: this.createTokenPreview(config.refreshToken),
+          token_preview: createTokenPreview(config.refreshToken),
           auth_type: config.auth.toLowerCase(),
           remaining_usage: 0,
           expires_at: cached?.token.expiresAt?.toISOString() || new Date(Date.now() + 3600000).toISOString(),
@@ -403,8 +439,8 @@ export class TokenManager {
       // Build token data
       const tokenData: Record<string, unknown> = {
         index: i,
-        user_email: this.maskEmail(userEmail),
-        token_preview: this.createTokenPreview(cached.token.accessToken || ""),
+        user_email: maskEmail(userEmail),
+        token_preview: createTokenPreview(cached.token.accessToken || ""),
         auth_type: config.auth.toLowerCase(),
         remaining_usage: remainingUsage,
         expires_at: cached.token.expiresAt?.toISOString() || new Date(Date.now() + 3600000).toISOString(),
@@ -414,12 +450,7 @@ export class TokenManager {
 
       // Add IdC specific info
       if (config.auth === "IdC" && config.clientId) {
-        if (config.clientId.length > 10) {
-          tokenData.client_id = config.clientId.substring(0, 5) + "***" + 
-                                 config.clientId.substring(config.clientId.length - 3);
-        } else {
-          tokenData.client_id = config.clientId;
-        }
+        tokenData.client_id = maskClientId(config.clientId);
       }
 
       tokenList.push(tokenData);
@@ -438,63 +469,4 @@ export class TokenManager {
     };
   }
 
-  // Create token preview (***+last 10 chars) - matching Go version
-  private createTokenPreview(token: string): string {
-    if (token.length <= 10) {
-      return "*".repeat(token.length);
-    }
-    const suffix = token.substring(token.length - 10);
-    return "***" + suffix;
-  }
-
-  // Mask email for privacy - matching Go version
-  private maskEmail(email: string): string {
-    if (!email || email === "未知用户" || email === "未获取") {
-      return email;
-    }
-
-    // Split email into username and domain
-    const parts = email.split("@");
-    if (parts.length !== 2) {
-      // Not a valid email format
-      return email;
-    }
-
-    const username = parts[0];
-    const domain = parts[1];
-
-    // Mask username: keep first 2 and last 2 chars
-    let maskedUsername: string;
-    if (username.length <= 4) {
-      maskedUsername = "*".repeat(username.length);
-    } else {
-      const prefix = username.substring(0, 2);
-      const suffix = username.substring(username.length - 2);
-      const middleLen = username.length - 4;
-      maskedUsername = prefix + "*".repeat(middleLen) + suffix;
-    }
-
-    // Mask domain: keep TLD and second-level domain
-    const domainParts = domain.split(".");
-    let maskedDomain: string;
-
-    if (domainParts.length === 1) {
-      maskedDomain = "*".repeat(domain.length);
-    } else if (domainParts.length === 2) {
-      // e.g., gmail.com -> *****.com
-      maskedDomain = "*".repeat(domainParts[0].length) + "." + domainParts[1];
-    } else {
-      // e.g., sun.edu.pl -> ***.edu.pl
-      const maskedParts: string[] = [];
-      for (let i = 0; i < domainParts.length - 2; i++) {
-        maskedParts.push("*".repeat(domainParts[i].length));
-      }
-      // Keep last two levels
-      maskedParts.push(domainParts[domainParts.length - 2]);
-      maskedParts.push(domainParts[domainParts.length - 1]);
-      maskedDomain = maskedParts.join(".");
-    }
-
-    return maskedUsername + "@" + maskedDomain;
-  }
 }
