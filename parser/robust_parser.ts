@@ -5,6 +5,7 @@ import {
   getEventTypeFromHeaders,
   getContentTypeFromHeaders,
 } from "./header_parser.ts";
+import * as logger from "../logger/logger.ts";
 
 interface EventStreamMessage {
   headers: Record<string, HeaderValue>;
@@ -105,18 +106,18 @@ export class RobustEventStreamParser {
     // 使用新的 HeaderParser 解析头部，支持断点续传和容错
     let headers: Record<string, HeaderValue>;
     if (headerData.length === 0) {
-      console.debug("Empty header detected, using defaults");
+      logger.debug("Empty header detected, using defaults");
       headers = this.headerParser.forceCompleteHeaderParsing(this.headerParser.getState());
     } else {
       try {
         headers = this.headerParser.parseHeaders(headerData);
         // 检查是否可以恢复
         if (Object.keys(headers).length === 0 && this.headerParser.isHeaderParseRecoverable(this.headerParser.getState())) {
-          console.warn("Header parsing incomplete, forcing completion");
+          logger.warn("Header parsing incomplete, forcing completion");
           headers = this.headerParser.forceCompleteHeaderParsing(this.headerParser.getState());
         }
       } catch (err) {
-        console.warn(`Header parsing failed, using defaults:`, err);
+        logger.warn("Header parsing failed, using defaults", logger.Err(err));
         headers = this.headerParser.forceCompleteHeaderParsing(this.headerParser.getState());
       }
     }
@@ -124,7 +125,11 @@ export class RobustEventStreamParser {
     // 添加 payload 调试信息
     if (payloadData.length > 0) {
       const payloadPreview = new TextDecoder().decode(payloadData.slice(0, Math.min(100, payloadData.length)));
-      console.debug(`Payload debug: length=${payloadData.length}, preview=${payloadPreview}...`);
+      logger.debug(
+        "Payload parsed",
+        logger.Int("length", payloadData.length),
+        logger.String("preview", payloadPreview.substring(0, 100))
+      );
     }
 
     return {
@@ -148,7 +153,7 @@ export class RobustEventStreamParser {
       const toolUseIds = this.extractToolUseIds(payloadStr);
       for (const toolUseId of toolUseIds) {
         if (!this.isValidToolUseIdFormat(toolUseId)) {
-          console.warn(`Detected potentially corrupted tool_use_id: ${toolUseId}`);
+          logger.warn("Detected potentially corrupted tool_use_id", logger.String("tool_use_id", toolUseId));
         }
       }
     }
@@ -195,7 +200,7 @@ export class RobustEventStreamParser {
         if (this.isValidToolUseIdFormat(toolUseId)) {
           toolUseIds.push(toolUseId);
         } else {
-          console.warn(`Skipping invalid tool_use_id: ${toolUseId}`);
+          logger.warn("Skipping invalid tool_use_id", logger.String("tool_use_id", toolUseId));
         }
       }
 
@@ -214,7 +219,7 @@ export class RobustEventStreamParser {
 
     // 长度检查
     if (toolUseId.length < 20 || toolUseId.length > 50) {
-      console.debug(`tool_use_id length abnormal: ${toolUseId.length}`);
+      logger.debug("tool_use_id length abnormal", logger.Int("length", toolUseId.length));
       return false;
     }
 
@@ -229,14 +234,18 @@ export class RobustEventStreamParser {
         (code >= 48 && code <= 57) ||  // 0-9
         char === '_' || char === '-'
       )) {
-        console.debug(`tool_use_id contains invalid character at position ${i + 8}: ${char}`);
+        logger.debug(
+          "tool_use_id contains invalid character",
+          logger.Int("position", i + 8),
+          logger.String("character", char)
+        );
         return false;
       }
     }
 
     // 检查明显的损坏模式
     if (toolUseId.includes("tooluluse_") || toolUseId.includes("tooluse_tooluse_")) {
-      console.warn(`Detected obviously corrupted tool_use_id pattern: ${toolUseId}`);
+      logger.warn("Detected obviously corrupted tool_use_id pattern", logger.String("tool_use_id", toolUseId));
       return false;
     }
 
