@@ -30,10 +30,10 @@ export interface AnthropicRequest {
   model: string;
   max_tokens: number;
   messages: AnthropicRequestMessage[];
-  system?: string | AnthropicSystemMessage[];
+  system?: AnthropicSystemMessage[];
   tools?: AnthropicTool[];
   tool_choice?: string | ToolChoice;
-  stream?: boolean;
+  stream: boolean;
   temperature?: number;
   metadata?: Record<string, unknown>;
 }
@@ -41,7 +41,7 @@ export interface AnthropicRequest {
 // Anthropic stream response
 export interface AnthropicStreamResponse {
   type: string;
-  index?: number;
+  index: number;
   delta?: {
     text: string;
     type: string;

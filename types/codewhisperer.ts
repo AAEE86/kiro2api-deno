@@ -172,8 +172,20 @@ export function assistantResponseEventFromDict(data: Record<string, unknown>): A
   if (typeof data.messageId === "string") are.messageId = data.messageId;
   if (typeof data.content === "string") are.content = data.content;
 
-  if (typeof data.contentType === "string") are.contentType = data.contentType as ContentType;
-  if (typeof data.messageStatus === "string") are.messageStatus = data.messageStatus as MessageStatus;
+  if (typeof data.contentType === "string") {
+    are.contentType = data.contentType as ContentType;
+  } else {
+    // default like Go: text/markdown
+    are.contentType = "text/markdown" as ContentType;
+  }
+
+  if (typeof data.messageStatus === "string") {
+    are.messageStatus = data.messageStatus as MessageStatus;
+  } else {
+    // default like Go: COMPLETED
+    are.messageStatus = "COMPLETED" as MessageStatus;
+  }
+
   if (typeof data.userIntent === "string") are.userIntent = data.userIntent as UserIntent;
 
   if (Array.isArray(data.supplementaryWebLinks)) {

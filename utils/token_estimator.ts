@@ -1,3 +1,9 @@
+import {
+  LONG_TEXT_THRESHOLD,
+  SHORT_TEXT_THRESHOLD,
+  TOKEN_ESTIMATION_RATIO,
+} from "../config/runtime.ts";
+
 interface CountTokensRequest {
   system?: Array<{ text: string }>;
   messages: Array<{ content: unknown }>;
@@ -33,7 +39,7 @@ export class TokenEstimator {
           totalTokens += this.estimateContentBlock(block);
         }
       } else {
-        totalTokens += JSON.stringify(msg.content).length / 4;
+        totalTokens += JSON.stringify(msg.content).length / TOKEN_ESTIMATION_RATIO;
       }
     }
 
@@ -138,7 +144,7 @@ export class TokenEstimator {
       let charsPerToken: number;
       if (nonChineseChars < 50) {
         charsPerToken = 2.8;
-      } else if (nonChineseChars < 100) {
+      } else if (nonChineseChars < SHORT_TEXT_THRESHOLD) {
         charsPerToken = 2.6;
       } else {
         charsPerToken = 2.5;
@@ -149,7 +155,7 @@ export class TokenEstimator {
     let tokens = chineseTokens + nonChineseTokens;
 
     // Long text compression
-    if (runeCount >= 1000) {
+    if (runeCount >= LONG_TEXT_THRESHOLD) {
       tokens = Math.floor(tokens * 0.60);
     } else if (runeCount >= 500) {
       tokens = Math.floor(tokens * 0.70);
@@ -157,7 +163,7 @@ export class TokenEstimator {
       tokens = Math.floor(tokens * 0.80);
     } else if (runeCount >= 200) {
       tokens = Math.floor(tokens * 0.85);
-    } else if (runeCount >= 100) {
+    } else if (runeCount >= SHORT_TEXT_THRESHOLD) {
       tokens = Math.floor(tokens * 0.90);
     } else if (runeCount >= 50) {
       tokens = Math.floor(tokens * 0.95);
@@ -196,7 +202,7 @@ export class TokenEstimator {
         return 50;
       }
       default:
-        return Math.floor(JSON.stringify(block).length / 4);
+        return Math.floor(JSON.stringify(block).length / TOKEN_ESTIMATION_RATIO);
     }
   }
 
@@ -206,7 +212,7 @@ export class TokenEstimator {
     totalTokens += 1; // input keyword
 
     if (Object.keys(toolInput).length > 0) {
-      totalTokens += Math.floor(JSON.stringify(toolInput).length / 4);
+      totalTokens += Math.floor(JSON.stringify(toolInput).length / TOKEN_ESTIMATION_RATIO);
     } else {
       totalTokens += 1;
     }
@@ -227,5 +233,5 @@ export function isValidClaudeModel(model: string): boolean {
     "anthropic.claude",
   ];
 
-  return validPrefixes.some(prefix => lowerModel.startsWith(prefix));
+  return validPrefixes.some((prefix) => lowerModel.startsWith(prefix));
 }

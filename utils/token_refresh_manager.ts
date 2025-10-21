@@ -124,9 +124,11 @@ export class TokenRefreshManager {
     const now = Date.now();
 
     for (const [key, token] of this.refreshing.entries()) {
-      if (token.status !== TokenRefreshStatus.Refreshing &&
-          token.endTime &&
-          now - token.endTime.getTime() > maxAge) {
+      if (
+        token.status !== TokenRefreshStatus.Refreshing &&
+        token.endTime &&
+        now - token.endTime.getTime() > maxAge
+      ) {
         this.refreshing.delete(key);
         cleared++;
       }

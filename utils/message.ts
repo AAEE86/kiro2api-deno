@@ -56,7 +56,7 @@ export function getMessageContent(content: unknown): string {
     for (const block of content) {
       if (typeof block === "object" && block !== null) {
         const cb = block as Record<string, unknown>;
-        
+
         if (cb.type === "tool_result") {
           let toolResultContent = parseToolResultContent(cb.content);
           if (cb.is_error === true) {

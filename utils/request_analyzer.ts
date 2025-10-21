@@ -45,7 +45,7 @@ export function analyzeRequestComplexity(req: AnthropicRequest): RequestComplexi
   if (req.system) {
     const systemContent = typeof req.system === "string"
       ? req.system
-      : req.system.map(s => s.text).join("");
+      : req.system.map((s) => s.text).join("");
     if (systemContent.length > 2000) {
       complexityScore += 1;
     }
@@ -53,14 +53,29 @@ export function analyzeRequestComplexity(req: AnthropicRequest): RequestComplexi
 
   // 5. Check complex keywords
   const complexKeywords = [
-    "分析", "analyze", "详细", "detail", "总结", "summary",
-    "代码审查", "code review", "重构", "refactor", "优化", "optimize",
-    "复杂", "complex", "深入", "comprehensive", "完整", "complete",
+    "分析",
+    "analyze",
+    "详细",
+    "detail",
+    "总结",
+    "summary",
+    "代码审查",
+    "code review",
+    "重构",
+    "refactor",
+    "优化",
+    "optimize",
+    "复杂",
+    "complex",
+    "深入",
+    "comprehensive",
+    "完整",
+    "complete",
   ];
 
   for (const msg of req.messages) {
     const content = getMessageContent(msg.content).toLowerCase();
-    if (complexKeywords.some(keyword => content.includes(keyword))) {
+    if (complexKeywords.some((keyword) => content.includes(keyword))) {
       complexityScore += 1;
       break;
     }

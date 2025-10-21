@@ -66,24 +66,6 @@ export class ModelNotFoundErrorType extends Error {
   }
 }
 
-// Legacy token types for backward compatibility
-export interface TokenInfo {
-  accessToken: string;
-  refreshToken: string;
-  expiresAt: Date;
-  expiresIn?: number;
-  profileArn?: string;
-}
-
-export interface TokenWithUsage {
-  tokenInfo: TokenInfo;
-  configIndex: number;
-  availableCount?: number;
-  isUsageExceeded?: boolean;
-  usageLimits?: unknown;
-  lastUsageCheck?: Date;
-}
-
 // Image source structure
 export interface ImageSource {
   type: string;
@@ -104,15 +86,15 @@ export interface ContentBlock {
   source?: ImageSource;
 }
 
-// Model information
+// Model information (align with Go types as required fields)
 export interface Model {
   id: string;
   object: string;
   created: number;
   owned_by: string;
-  display_name?: string;
-  type?: string;
-  max_tokens?: number;
+  display_name: string;
+  type: string;
+  max_tokens: number;
 }
 
 export interface ModelsResponse {
@@ -123,3 +105,4 @@ export interface ModelsResponse {
 // Re-export token types for backward compatibility
 export type { Token, RefreshResponse, RefreshRequest, IdcRefreshRequest } from "./token.ts";
 export { isTokenExpired, createTokenFromRefreshResponse } from "./token.ts";
+export type { TokenWithUsage } from "./usage_limits.ts";

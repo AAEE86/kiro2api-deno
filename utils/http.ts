@@ -1,7 +1,7 @@
 export async function readHTTPResponse(body: ReadableStream<Uint8Array>): Promise<Uint8Array> {
   const chunks: Uint8Array[] = [];
   const reader = body.getReader();
-  
+
   try {
     while (true) {
       const { done, value } = await reader.read();
@@ -11,7 +11,7 @@ export async function readHTTPResponse(body: ReadableStream<Uint8Array>): Promis
   } finally {
     reader.releaseLock();
   }
-  
+
   const totalLength = chunks.reduce((acc, chunk) => acc + chunk.length, 0);
   const result = new Uint8Array(totalLength);
   let offset = 0;
@@ -19,6 +19,6 @@ export async function readHTTPResponse(body: ReadableStream<Uint8Array>): Promis
     result.set(chunk, offset);
     offset += chunk.length;
   }
-  
+
   return result;
 }
