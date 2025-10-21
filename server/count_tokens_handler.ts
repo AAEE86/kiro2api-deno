@@ -125,6 +125,7 @@ class TokenEstimator {
 // 验证Claude模型
 function isValidClaudeModel(model: string): boolean {
   const validModels = [
+    "claude-sonnet-4-5",
     "claude-sonnet-4-5-20250929",
     "claude-sonnet-4-20250514",
     "claude-3-7-sonnet-20250219",

@@ -95,12 +95,22 @@ export class StreamProcessorContext {
 
     const validation = this.sseStateManager.validateAndSend(startEvent);
     if (validation.valid) {
-      controller.enqueue(encoder.encode(`data: ${JSON.stringify(startEvent)}\n\n`));
+      controller.enqueue(
+        encoder.encode(
+          `event: ${startEvent.type}\n` +
+          `data: ${JSON.stringify(startEvent)}\n\n`,
+        ),
+      );
     }
 
     // ping事件
     const pingEvent = { type: "ping" };
-    controller.enqueue(encoder.encode(`data: ${JSON.stringify(pingEvent)}\n\n`));
+    controller.enqueue(
+      encoder.encode(
+        `event: ping\n` +
+        `data: ${JSON.stringify(pingEvent)}\n\n`,
+      ),
+    );
   }
 
   /**
@@ -281,7 +291,12 @@ export class StreamProcessorContext {
     // 验证并发送事件
     const validation = this.sseStateManager.validateAndSend(dataMap);
     if (validation.valid) {
-      controller.enqueue(encoder.encode(`data: ${JSON.stringify(dataMap)}\n\n`));
+      controller.enqueue(
+        encoder.encode(
+          `event: ${eventType}\n` +
+          `data: ${JSON.stringify(dataMap)}\n\n`,
+        ),
+      );
     }
 
     // 累计token（基于实际发送的内容）
@@ -344,7 +359,12 @@ export class StreamProcessorContext {
       const stopEvent = { type: "content_block_stop", index: 0 };
       const validation = this.sseStateManager.validateAndSend(stopEvent);
       if (validation.valid) {
-        controller.enqueue(encoder.encode(`data: ${JSON.stringify(stopEvent)}\n\n`));
+        controller.enqueue(
+          encoder.encode(
+            `event: content_block_stop\n` +
+            `data: ${JSON.stringify(stopEvent)}\n\n`,
+          ),
+        );
       }
     }
 
@@ -354,7 +374,12 @@ export class StreamProcessorContext {
         const stopEvent = { type: "content_block_stop", index };
         const validation = this.sseStateManager.validateAndSend(stopEvent);
         if (validation.valid) {
-          controller.enqueue(encoder.encode(`data: ${JSON.stringify(stopEvent)}\n\n`));
+          controller.enqueue(
+            encoder.encode(
+              `event: content_block_stop\n` +
+              `data: ${JSON.stringify(stopEvent)}\n\n`,
+            ),
+          );
         }
       }
     }
@@ -390,14 +415,24 @@ export class StreamProcessorContext {
     };
     const validation2 = this.sseStateManager.validateAndSend(stopEvent);
     if (validation2.valid) {
-      controller.enqueue(encoder.encode(`data: ${JSON.stringify(stopEvent)}\n\n`));
+      controller.enqueue(
+        encoder.encode(
+          `event: message_delta\n` +
+          `data: ${JSON.stringify(stopEvent)}\n\n`,
+        ),
+      );
     }
 
     // 发送message_stop事件
     const messageStopEvent = { type: "message_stop" };
     const validation3 = this.sseStateManager.validateAndSend(messageStopEvent);
     if (validation3.valid) {
-      controller.enqueue(encoder.encode(`data: ${JSON.stringify(messageStopEvent)}\n\n`));
+      controller.enqueue(
+        encoder.encode(
+          `event: message_stop\n` +
+          `data: ${JSON.stringify(messageStopEvent)}\n\n`,
+        ),
+      );
     }
   }
 

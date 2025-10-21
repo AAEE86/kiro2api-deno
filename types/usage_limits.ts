@@ -65,11 +65,14 @@ export interface UsageLimits {
   usageBreakdown: unknown;
 }
 
-// Token with usage status (extends Token)
-export interface TokenWithUsage extends Token {
+// Token with usage status
+// Contains tokenInfo field instead of extending Token (matches Go version pattern)
+export interface TokenWithUsage {
+  tokenInfo: Token;
+  configIndex?: number;
   usageLimits?: UsageLimits;
   availableCount: number;
-  lastUsageCheck: Date;
+  lastUsageCheck?: Date;
   isUsageExceeded: boolean;
   usageCheckError?: string;
   userEmail?: string;
@@ -108,7 +111,7 @@ export function getAvailableCount(token: TokenWithUsage): number {
 // Check if token is usable (considering expiration and usage limits)
 export function isTokenUsable(token: TokenWithUsage): boolean {
   // Check if token is expired (align with Go's Token.IsExpired)
-  if (isTokenExpired(token)) {
+  if (isTokenExpired(token.tokenInfo)) {
     return false;
   }
 
@@ -130,7 +133,7 @@ export function needsUsageRefresh(
   if (!token.usageLimits) return true;
 
   // Last check exceeded cache TTL
-  if (Date.now() - token.lastUsageCheck.getTime() > cacheTTL) {
+  if (!token.lastUsageCheck || Date.now() - token.lastUsageCheck.getTime() > cacheTTL) {
     return true;
   }
 
@@ -155,8 +158,8 @@ export function getUserEmailDisplay(token: TokenWithUsage): string {
 
 // Update user info from usage limits
 export function updateUserInfo(token: TokenWithUsage): void {
-  if (token.accessToken) {
-    token.tokenPreview = generateTokenPreview(token.accessToken);
+  if (token.tokenInfo.accessToken) {
+    token.tokenPreview = generateTokenPreview(token.tokenInfo.accessToken);
   }
 
   if (token.usageLimits?.userInfo?.email) {

@@ -1,5 +1,7 @@
+// deno-lint-ignore-file no-unused-vars
 /**
  * Token Admin - 前端控制器
+ * 注意：某些函数通过 HTML onclick 属性调用，因此需要忽略 no-unused-vars 警告
  */
 
 const API_BASE = '/api/admin';
@@ -45,7 +47,7 @@ async function loadTokens() {
                 return;
             }
             
-            listContainer.innerHTML = data.tokens.map((token, index) => `
+            listContainer.innerHTML = data.tokens.map((token) => `
                 <div class="token-item">
                     <div class="token-info">
                         <span class="token-type">${token.auth}</span>

@@ -106,3 +106,6 @@ export interface ModelsResponse {
 export type { Token, RefreshResponse, RefreshRequest, IdcRefreshRequest } from "./token.ts";
 export { isTokenExpired, createTokenFromRefreshResponse } from "./token.ts";
 export type { TokenWithUsage } from "./usage_limits.ts";
+
+// Backward compatibility: TokenInfo is the same as Token
+export type { Token as TokenInfo } from "./token.ts";

@@ -7,7 +7,7 @@ import * as logger from "../logger/logger.ts";
 /**
  * 获取所有 tokens
  */
-export async function handleGetTokens(req: Request, authService?: AuthService): Promise<Response> {
+export async function handleGetTokens(_req: Request, _authService?: AuthService): Promise<Response> {
   const corsHeaders = getCORSHeaders();
 
   try {
@@ -273,7 +273,7 @@ export async function handleImportTokens(req: Request, authService?: AuthService
 /**
  * 清空所有 tokens
  */
-export async function handleClearTokens(req: Request, authService?: AuthService): Promise<Response> {
+export async function handleClearTokens(_req: Request, authService?: AuthService): Promise<Response> {
   const corsHeaders = getCORSHeaders();
 
   try {

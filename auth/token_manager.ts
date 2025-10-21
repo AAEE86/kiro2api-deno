@@ -193,7 +193,7 @@ export class TokenManager {
     logger.info(
       "Token 刷新成功",
       logger.Int("config_index", configIndex),
-      logger.String("expires_at", token.expiresAt.toISOString()),
+      logger.String("expires_at", token.expiresAt?.toISOString() || "unknown"),
       logger.Float("available", available)
     );
 
@@ -202,6 +202,7 @@ export class TokenManager {
 
   // Check if token is expired (with 5 minute buffer)
   private isTokenExpired(token: TokenInfo): boolean {
+    if (!token.expiresAt) return false;
     const now = new Date();
     const bufferMs = 5 * 60 * 1000; // 5 minutes
     return now.getTime() >= token.expiresAt.getTime() - bufferMs;
@@ -227,7 +228,7 @@ export class TokenManager {
           token_preview: this.createTokenPreview(config.refreshToken),
           auth_type: config.auth.toLowerCase(),
           remaining_usage: 0,
-          expires_at: cached?.token.expiresAt.toISOString() || new Date(Date.now() + 3600000).toISOString(),
+          expires_at: cached?.token.expiresAt?.toISOString() || new Date(Date.now() + 3600000).toISOString(),
           last_used: "未知",
           status: cached ? "expired" : "pending",
         });
@@ -285,10 +286,10 @@ export class TokenManager {
       const tokenData: Record<string, unknown> = {
         index: i,
         user_email: this.maskEmail(userEmail),
-        token_preview: this.createTokenPreview(cached.token.accessToken),
+        token_preview: this.createTokenPreview(cached.token.accessToken || ""),
         auth_type: config.auth.toLowerCase(),
         remaining_usage: remainingUsage,
-        expires_at: cached.token.expiresAt.toISOString(),
+        expires_at: cached.token.expiresAt?.toISOString() || new Date(Date.now() + 3600000).toISOString(),
         last_used: new Date().toISOString(),
         status: isActive ? "active" : "exhausted",
       };
