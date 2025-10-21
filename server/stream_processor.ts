@@ -153,19 +153,25 @@ export class StreamProcessorContext {
 
   /**
    * 处理单个AWS EventStream消息
+   * 返回 true 表示应该终止流处理
    */
   processMessage(
     message: { payload: Uint8Array },
     controller: ReadableStreamDefaultController,
     encoder: TextEncoder,
-  ): void {
+  ): boolean {
     // 解析 payload 获取事件数据
     let event: Record<string, unknown>;
     try {
       const payload = JSON.parse(new TextDecoder().decode(message.payload));
       event = payload.assistantResponseEvent || payload;
     } catch {
-      return;
+      return false;
+    }
+
+    // 检查是否为异常事件
+    if (this.handleExceptionEvent(event, controller, encoder)) {
+      return true; // 终止流处理
     }
 
     // 将 CodeWhisperer 事件转换为 Anthropic SSE 格式
@@ -175,6 +181,8 @@ export class StreamProcessorContext {
     for (const dataMap of anthropicEvents) {
       this.processAnthropicEvent(dataMap, controller, encoder);
     }
+
+    return false;
   }
 
   /**
@@ -301,6 +309,90 @@ export class StreamProcessorContext {
 
     // 累计token（基于实际发送的内容）
     this.accumulateTokens(dataMap);
+  }
+
+  /**
+   * 处理上游异常事件
+   * 返回 true 表示已处理异常并应终止流
+   */
+  private handleExceptionEvent(
+    event: Record<string, unknown>,
+    controller: ReadableStreamDefaultController,
+    encoder: TextEncoder,
+  ): boolean {
+    // 提取异常类型
+    const exceptionType = (event.exception_type as string) || (event.__type as string);
+
+    // 检查是否为内容长度超限异常
+    if (
+      exceptionType === "ContentLengthExceededException" ||
+      exceptionType?.includes("CONTENT_LENGTH_EXCEEDS")
+    ) {
+      logger.info(
+        "检测到内容长度超限异常，映射为max_tokens stop_reason",
+        logger.String("request_id", this.requestId),
+        logger.String("exception_type", exceptionType),
+        logger.String("claude_stop_reason", "max_tokens"),
+      );
+
+      // 强制设置 stop_reason 为 max_tokens
+      this.stopReasonManager.forceStopReason("max_tokens");
+
+      // 关闭所有活跃的 content_block
+      for (const [index, block] of this.sseStateManager.getActiveBlocks().entries()) {
+        if (block.started && !block.stopped) {
+          const stopEvent = { type: "content_block_stop", index };
+          const validation = this.sseStateManager.validateAndSend(stopEvent);
+          if (validation.valid) {
+            controller.enqueue(
+              encoder.encode(
+                `event: content_block_stop\n` +
+                `data: ${JSON.stringify(stopEvent)}\n\n`,
+              ),
+            );
+          }
+        }
+      }
+
+      // 发送 message_delta 事件（max_tokens）
+      const maxTokensEvent = {
+        type: "message_delta",
+        delta: {
+          stop_reason: "max_tokens",
+          stop_sequence: null,
+        },
+        usage: {
+          output_tokens: Math.max(1, this.totalOutputTokens),
+        },
+      };
+
+      const validation1 = this.sseStateManager.validateAndSend(maxTokensEvent);
+      if (validation1.valid) {
+        controller.enqueue(
+          encoder.encode(
+            `event: message_delta\n` +
+            `data: ${JSON.stringify(maxTokensEvent)}\n\n`,
+          ),
+        );
+      }
+
+      // 发送 message_stop 事件
+      const messageStopEvent = { type: "message_stop" };
+      const validation2 = this.sseStateManager.validateAndSend(messageStopEvent);
+      if (validation2.valid) {
+        controller.enqueue(
+          encoder.encode(
+            `event: message_stop\n` +
+            `data: ${JSON.stringify(messageStopEvent)}\n\n`,
+          ),
+        );
+      }
+
+      return true; // 已处理异常，终止流
+    }
+
+    // 其他类型的异常，不处理
+    return false;
   }
 
   /**
@@ -444,6 +536,7 @@ export class StreamProcessorContext {
     controller: ReadableStreamDefaultController,
   ): Promise<void> {
     const encoder = new TextEncoder();
+    let shouldTerminate = false;
 
     while (true) {
       const { done, value } = await reader.read();
@@ -456,7 +549,19 @@ export class StreamProcessorContext {
       this.totalProcessedEvents += messages.length;
 
       for (const message of messages) {
-        this.processMessage(message, controller, encoder);
+        shouldTerminate = this.processMessage(message, controller, encoder);
+        if (shouldTerminate) {
+          logger.info(
+            "检测到终止信号，停止流处理",
+            logger.String("request_id", this.requestId),
+          );
+          break;
+        }
+      }
+
+      // 如果检测到终止信号，跳出读取循环
+      if (shouldTerminate) {
+        break;
       }
     }
 
@@ -465,6 +570,7 @@ export class StreamProcessorContext {
       logger.String("request_id", this.requestId),
       logger.Int("total_read_bytes", this.totalReadBytes),
       logger.Int("total_messages", this.totalProcessedEvents),
+      logger.Bool("terminated_by_exception", shouldTerminate),
     );
   }
 }

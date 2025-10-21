@@ -31,6 +31,9 @@ export class OpenAIStreamProcessorContext {
   private nextToolIndex = 0;
   private sawToolUse = false;
 
+  // 异常处理
+  private forcedFinishReason: string | null = null;
+
   // 统计信息
   public totalProcessedEvents = 0;
 
@@ -81,21 +84,26 @@ export class OpenAIStreamProcessorContext {
 
   /**
    * 处理单个AWS EventStream消息并转换为OpenAI格式
+   * 返回 true 表示应该终止流处理
    */
   processMessage(
     message: { payload: Uint8Array },
     controller: ReadableStreamDefaultController,
     encoder: TextEncoder,
-  ): void {
+  ): boolean {
     // 解析 payload
     let event: Record<string, unknown>;
     try {
       const payload = JSON.parse(new TextDecoder().decode(message.payload));
       event = payload.assistantResponseEvent || payload;
     } catch {
-      return;
+      return false;
     }
 
+    // 检查是否为异常事件
+    if (this.handleExceptionEvent(event, controller, encoder)) {
+      return true; // 终止流处理
+    }
 
     // 处理文本内容
     if (event.content) {
@@ -174,14 +182,64 @@ export class OpenAIStreamProcessorContext {
     }
 
     this.totalProcessedEvents++;
+    return false;
   }
 
+  /**
+   * 处理上游异常事件
+   * 返回 true 表示已处理异常并应终止流
+   */
+  private handleExceptionEvent(
+    event: Record<string, unknown>,
+    controller: ReadableStreamDefaultController,
+    encoder: TextEncoder,
+  ): boolean {
+    // 提取异常类型
+    const exceptionType = (event.exception_type as string) || (event.__type as string);
+
+    // 检查是否为内容长度超限异常
+    if (
+      exceptionType === "ContentLengthExceededException" ||
+      exceptionType?.includes("CONTENT_LENGTH_EXCEEDS")
+    ) {
+      logger.info(
+        "检测到内容长度超限异常，映射为length finish_reason",
+        logger.String("request_id", this.requestId),
+        logger.String("exception_type", exceptionType),
+        logger.String("openai_finish_reason", "length"),
+      );
+
+      // 强制设置 finish_reason 为 length（OpenAI格式）
+      this.forcedFinishReason = "length";
+
+      // 发送结束事件
+      const finalEvent = {
+        id: this.messageId,
+        object: "chat.completion.chunk",
+        created: Math.floor(Date.now() / 1000),
+        model: this.openaiReq.model,
+        choices: [{
+          index: 0,
+          delta: {},
+          finish_reason: "length",
+        }],
+      };
+      controller.enqueue(encoder.encode(`data: ${JSON.stringify(finalEvent)}\n\n`));
+      controller.enqueue(encoder.encode("data: [DONE]\n\n"));
+
+      return true; // 已处理异常，终止流
+    }
+
+    // 其他类型的异常，不处理
+    return false;
+  }
 
   /**
    * 发送结束事件
    */
   sendFinalEvent(controller: ReadableStreamDefaultController, encoder: TextEncoder): void {
-    const finishReason = this.sawToolUse ? "tool_calls" : "stop";
+    // 优先使用强制设置的 finish_reason（用于异常处理）
+    const finishReason = this.forcedFinishReason || (this.sawToolUse ? "tool_calls" : "stop");
     
     const finalEvent = {
       id: this.messageId,
@@ -214,6 +272,7 @@ export class OpenAIStreamProcessorContext {
     controller: ReadableStreamDefaultController,
   ): Promise<void> {
     const encoder = new TextEncoder();
+    let shouldTerminate = false;
 
     while (true) {
       const { done, value } = await reader.read();
@@ -223,9 +282,27 @@ export class OpenAIStreamProcessorContext {
       const messages = this.binaryParser.parseStream(value);
 
       for (const message of messages) {
-        this.processMessage(message, controller, encoder);
+        shouldTerminate = this.processMessage(message, controller, encoder);
+        if (shouldTerminate) {
+          logger.info(
+            "检测到终止信号，停止OpenAI流处理",
+            logger.String("request_id", this.requestId),
+          );
+          break;
+        }
+      }
+
+      // 如果检测到终止信号，跳出读取循环
+      if (shouldTerminate) {
+        break;
       }
     }
+
+    logger.debug(
+      "OpenAI响应流结束",
+      logger.String("request_id", this.requestId),
+      logger.Bool("terminated_by_exception", shouldTerminate),
+    );
   }
 }
 

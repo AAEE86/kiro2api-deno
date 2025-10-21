@@ -4,18 +4,33 @@ import * as logger from "../logger/logger.ts";
 export class StopReasonManager {
   private hasActiveToolCalls = false;
   private hasCompletedTools = false;
+  private forcedStopReason: string | null = null;
 
   updateToolCallStatus(hasActiveCalls: boolean, hasCompleted: boolean): void {
     this.hasActiveToolCalls = hasActiveCalls;
     this.hasCompletedTools = hasCompleted;
 
-    logger.debug("更新工具调用状态", 
+    logger.debug("更新工具调用状态",
       logger.Bool("has_active_tools", hasActiveCalls),
       logger.Bool("has_completed_tools", hasCompleted)
     );
   }
 
+  /**
+   * 强制设置 stop_reason
+   * 用于处理特殊情况，如异常映射（ContentLengthExceededException -> max_tokens）
+   */
+  forceStopReason(reason: string): void {
+    this.forcedStopReason = reason;
+    logger.debug("强制设置stop_reason", logger.String("reason", reason));
+  }
+
   determineStopReason(): string {
+    // 优先使用强制设置的 stop_reason（用于异常处理）
+    if (this.forcedStopReason) {
+      return this.forcedStopReason;
+    }
+
     // 根据Claude规范，只要消息包含tool_use块，stop_reason就应该是tool_use
     if (this.hasActiveToolCalls || this.hasCompletedTools) {
       return "tool_use";
