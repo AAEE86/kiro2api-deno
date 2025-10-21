@@ -1,3 +1,5 @@
+import { KVStore } from "./kv_store.ts";
+
 // Authentication configuration types
 export interface AuthConfig {
   auth: "Social" | "IdC";
@@ -8,8 +10,32 @@ export interface AuthConfig {
   description?: string;
 }
 
-// Load authentication configurations from environment
+// Load authentication configurations from KV or environment
 export async function loadAuthConfigs(): Promise<AuthConfig[]> {
+  // First, try to load from KV
+  try {
+    const kvStore = await KVStore.create();
+    const kvConfigs = await kvStore.getAuthConfigs();
+    kvStore.close();
+    
+    if (kvConfigs && kvConfigs.length > 0) {
+      console.log(`✅ 从 KV 加载了 ${kvConfigs.length} 个认证配置`);
+      // Filter and validate
+      const enabledConfigs = kvConfigs.filter((c) => !c.disabled);
+      if (enabledConfigs.length > 0) {
+        return validateConfigs(enabledConfigs);
+      }
+    }
+  } catch (error) {
+    console.warn(`⚠️  从 KV 加载配置失败，将使用环境变量:`, error);
+  }
+  
+  // Fallback to environment variable
+  return await loadAuthConfigsFromEnv();
+}
+
+// Load authentication configurations from environment
+async function loadAuthConfigsFromEnv(): Promise<AuthConfig[]> {
   // Check for deprecated environment variables
   const deprecatedVars = [
     "REFRESH_TOKEN",
@@ -53,6 +79,22 @@ export async function loadAuthConfigs(): Promise<AuthConfig[]> {
   return parseAuthConfigs(authToken);
 }
 
+function validateConfigs(configs: AuthConfig[]): AuthConfig[] {
+  // Validate configs
+  for (const config of configs) {
+    if (!config.auth || !config.refreshToken) {
+      throw new Error("Invalid auth config: missing auth or refreshToken");
+    }
+
+    if (config.auth === "IdC") {
+      if (!config.clientId || !config.clientSecret) {
+        throw new Error("IdC auth requires clientId and clientSecret");
+      }
+    }
+  }
+  return configs;
+}
+
 function parseAuthConfigs(jsonString: string): AuthConfig[] {
   try {
     const configs = JSON.parse(jsonString) as AuthConfig[];
@@ -68,20 +110,7 @@ function parseAuthConfigs(jsonString: string): AuthConfig[] {
       throw new Error("No enabled authentication configs found");
     }
 
-    // Validate configs
-    for (const config of enabledConfigs) {
-      if (!config.auth || !config.refreshToken) {
-        throw new Error("Invalid auth config: missing auth or refreshToken");
-      }
-
-      if (config.auth === "IdC") {
-        if (!config.clientId || !config.clientSecret) {
-          throw new Error("IdC auth requires clientId and clientSecret");
-        }
-      }
-    }
-
-    return enabledConfigs;
+    return validateConfigs(enabledConfigs);
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     throw new Error(`Failed to parse auth configs: ${message}`);

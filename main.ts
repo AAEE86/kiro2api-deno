@@ -4,6 +4,13 @@ import {
   handleModels,
   handleTokenStatus,
 } from "./server/handlers.ts";
+import {
+  handleGetTokens,
+  handleAddToken,
+  handleDeleteToken,
+  handleImportTokens,
+  handleClearTokens,
+} from "./routes/token_admin.ts";
 import { handleCountTokens } from "./server/count_tokens_handler.ts";
 import { handleOpenAINonStreamRequest } from "./server/openai_handlers.ts";
 import { handleOpenAIStreamRequest } from "./server/openai_stream_processor.ts";
@@ -106,6 +113,16 @@ async function handleRequest(
       response = await handleModels();
     } else if (url.pathname === "/api/tokens" && req.method === "GET") {
       response = await handleTokenStatus(authService);
+    } else if (url.pathname === "/api/admin/tokens" && req.method === "GET") {
+      response = await handleGetTokens(req);
+    } else if (url.pathname === "/api/admin/tokens" && req.method === "POST") {
+      response = await handleAddToken(req);
+    } else if (url.pathname === "/api/admin/tokens" && req.method === "DELETE") {
+      response = await handleDeleteToken(req);
+    } else if (url.pathname === "/api/admin/tokens/import" && req.method === "POST") {
+      response = await handleImportTokens(req);
+    } else if (url.pathname === "/api/admin/tokens/clear" && req.method === "POST") {
+      response = await handleClearTokens(req);
     } else if (url.pathname === "/v1/messages" && req.method === "POST") {
       response = await handleMessages(req, authService);
     } else if (url.pathname === "/v1/messages/count_tokens" && req.method === "POST") {
@@ -134,6 +151,9 @@ async function handleRequest(
     } else if (url.pathname === "/" && req.method === "GET") {
       // Serve the dashboard index page
       response = await serveStaticFile("/index.html");
+    } else if (url.pathname === "/admin" && req.method === "GET") {
+      // Serve the admin page
+      response = await serveStaticFile("/admin.html");
     } else if (url.pathname.startsWith("/static/") && req.method === "GET") {
       // Serve static files (CSS, JS, images, etc.)
       response = await serveStaticFile(url.pathname);
