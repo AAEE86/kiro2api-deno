@@ -24,6 +24,36 @@ export class TokenManager {
     this.configs = configs;
   }
 
+  // Warm up all tokens by refreshing them
+  async warmupAllTokens(): Promise<void> {
+    logger.info(`开始预热 ${this.configs.length} 个 token...`);
+    
+    const results = await Promise.allSettled(
+      this.configs.map((config, index) => 
+        this.getOrRefreshToken(index, config)
+          .then(() => {
+            logger.info(`Token ${index + 1}/${this.configs.length} 预热成功`);
+          })
+          .catch((error) => {
+            logger.warn(
+              `Token ${index + 1}/${this.configs.length} 预热失败`,
+              logger.Err(error)
+            );
+          })
+      )
+    );
+    
+    const successful = results.filter(r => r.status === 'fulfilled').length;
+    const failed = results.filter(r => r.status === 'rejected').length;
+    
+    logger.info(
+      `Token 预热完成`,
+      logger.Int("total", this.configs.length),
+      logger.Int("successful", successful),
+      logger.Int("failed", failed)
+    );
+  }
+
   // Get the best available token (sequential selection)
   async getBestToken(): Promise<TokenInfo> {
     const result = await this.getBestTokenWithUsage();

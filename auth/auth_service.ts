@@ -10,24 +10,6 @@ export class AuthService {
     this.tokenManager = tokenManager;
   }
 
-  // Reload configurations from KV
-  async reload(): Promise<void> {
-    logger.info("正在重新加载认证配置...");
-    
-    const configs = await loadAuthConfigs();
-    logger.info(`重新加载了 ${configs.length} 个认证配置`);
-    
-    this.tokenManager = new TokenManager(configs);
-    
-    // Warm up the first token
-    try {
-      await this.tokenManager.getBestToken();
-      logger.info("Token 预热成功");
-    } catch (error) {
-      logger.warn("Token 预热失败", logger.Err(error));
-    }
-  }
-
   // Factory method to create AuthService
   static async create(): Promise<AuthService> {
     logger.info("正在创建 AuthService...");
@@ -37,15 +19,31 @@ export class AuthService {
 
     const tokenManager = new TokenManager(configs);
 
-    // Warm up the first token
+    // Warm up all tokens
     try {
-      await tokenManager.getBestToken();
-      logger.info("Token 预热成功");
+      await tokenManager.warmupAllTokens();
     } catch (error) {
       logger.warn("Token 预热失败", logger.Err(error));
     }
 
     return new AuthService(tokenManager);
+  }
+
+  // Reload configurations from KV
+  async reload(): Promise<void> {
+    logger.info("正在重新加载认证配置...");
+    
+    const configs = await loadAuthConfigs();
+    logger.info(`重新加载了 ${configs.length} 个认证配置`);
+    
+    this.tokenManager = new TokenManager(configs);
+    
+    // Warm up all tokens
+    try {
+      await this.tokenManager.warmupAllTokens();
+    } catch (error) {
+      logger.warn("Token 预热失败", logger.Err(error));
+    }
   }
 
   // Get a valid token
