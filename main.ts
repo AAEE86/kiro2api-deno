@@ -114,15 +114,15 @@ async function handleRequest(
     } else if (url.pathname === "/api/tokens" && req.method === "GET") {
       response = await handleTokenStatus(authService);
     } else if (url.pathname === "/api/admin/tokens" && req.method === "GET") {
-      response = await handleGetTokens(req);
+      response = await handleGetTokens(req, authService);
     } else if (url.pathname === "/api/admin/tokens" && req.method === "POST") {
-      response = await handleAddToken(req);
+      response = await handleAddToken(req, authService);
     } else if (url.pathname === "/api/admin/tokens" && req.method === "DELETE") {
-      response = await handleDeleteToken(req);
+      response = await handleDeleteToken(req, authService);
     } else if (url.pathname === "/api/admin/tokens/import" && req.method === "POST") {
-      response = await handleImportTokens(req);
+      response = await handleImportTokens(req, authService);
     } else if (url.pathname === "/api/admin/tokens/clear" && req.method === "POST") {
-      response = await handleClearTokens(req);
+      response = await handleClearTokens(req, authService);
     } else if (url.pathname === "/v1/messages" && req.method === "POST") {
       response = await handleMessages(req, authService);
     } else if (url.pathname === "/v1/messages/count_tokens" && req.method === "POST") {

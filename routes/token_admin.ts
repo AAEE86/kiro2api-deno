@@ -1,12 +1,13 @@
 import { KVStore } from "../auth/kv_store.ts";
 import type { AuthConfig } from "../auth/config.ts";
 import { getCORSHeaders } from "../server/middleware.ts";
+import { AuthService } from "../auth/auth_service.ts";
 import * as logger from "../logger/logger.ts";
 
 /**
  * 获取所有 tokens
  */
-export async function handleGetTokens(req: Request): Promise<Response> {
+export async function handleGetTokens(req: Request, authService?: AuthService): Promise<Response> {
   const corsHeaders = getCORSHeaders();
 
   try {
@@ -46,7 +47,7 @@ export async function handleGetTokens(req: Request): Promise<Response> {
 /**
  * 添加单个 token
  */
-export async function handleAddToken(req: Request): Promise<Response> {
+export async function handleAddToken(req: Request, authService?: AuthService): Promise<Response> {
   const corsHeaders = getCORSHeaders();
 
   try {
@@ -80,6 +81,16 @@ export async function handleAddToken(req: Request): Promise<Response> {
     kvStore.close();
 
     if (success) {
+      // Reload AuthService to pick up new token
+      if (authService) {
+        try {
+          await authService.reload();
+          logger.info("已重新加载 AuthService");
+        } catch (error) {
+          logger.error("重新加载 AuthService 失败", logger.Err(error));
+        }
+      }
+      
       return new Response(JSON.stringify({ 
         success: true, 
         message: "Token added successfully" 
@@ -111,7 +122,7 @@ export async function handleAddToken(req: Request): Promise<Response> {
 /**
  * 删除指定 token
  */
-export async function handleDeleteToken(req: Request): Promise<Response> {
+export async function handleDeleteToken(req: Request, authService?: AuthService): Promise<Response> {
   const corsHeaders = getCORSHeaders();
 
   try {
@@ -133,6 +144,16 @@ export async function handleDeleteToken(req: Request): Promise<Response> {
     kvStore.close();
 
     if (success) {
+      // Reload AuthService to pick up changes
+      if (authService) {
+        try {
+          await authService.reload();
+          logger.info("已重新加载 AuthService");
+        } catch (error) {
+          logger.error("重新加载 AuthService 失败", logger.Err(error));
+        }
+      }
+      
       return new Response(JSON.stringify({ 
         success: true, 
         message: "Token deleted successfully" 
@@ -164,7 +185,7 @@ export async function handleDeleteToken(req: Request): Promise<Response> {
 /**
  * 批量导入 tokens (一行一个 refreshToken)
  */
-export async function handleImportTokens(req: Request): Promise<Response> {
+export async function handleImportTokens(req: Request, authService?: AuthService): Promise<Response> {
   const corsHeaders = getCORSHeaders();
 
   try {
@@ -210,6 +231,16 @@ export async function handleImportTokens(req: Request): Promise<Response> {
     kvStore.close();
 
     if (success) {
+      // Reload AuthService to pick up new tokens
+      if (authService) {
+        try {
+          await authService.reload();
+          logger.info("已重新加载 AuthService");
+        } catch (error) {
+          logger.error("重新加载 AuthService 失败", logger.Err(error));
+        }
+      }
+      
       return new Response(JSON.stringify({ 
         success: true, 
         message: `Successfully imported ${tokens.length} tokens`,
@@ -242,7 +273,7 @@ export async function handleImportTokens(req: Request): Promise<Response> {
 /**
  * 清空所有 tokens
  */
-export async function handleClearTokens(req: Request): Promise<Response> {
+export async function handleClearTokens(req: Request, authService?: AuthService): Promise<Response> {
   const corsHeaders = getCORSHeaders();
 
   try {
@@ -251,6 +282,16 @@ export async function handleClearTokens(req: Request): Promise<Response> {
     kvStore.close();
 
     if (success) {
+      // Note: After clearing, AuthService will fall back to env var
+      if (authService) {
+        try {
+          await authService.reload();
+          logger.info("已重新加载 AuthService（将使用环境变量）");
+        } catch (error) {
+          logger.error("重新加载 AuthService 失败", logger.Err(error));
+        }
+      }
+      
       return new Response(JSON.stringify({ 
         success: true, 
         message: "All tokens cleared successfully" 
