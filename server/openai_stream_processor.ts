@@ -5,6 +5,7 @@ import { anthropicToCodeWhisperer } from "../converter/converter.ts";
 import { AWS_ENDPOINTS } from "../config/constants.ts";
 import { RobustEventStreamParser } from "../parser/robust_parser.ts";
 import * as logger from "../logger/logger.ts";
+import { BaseStreamProcessor } from "./base_stream_processor.ts";
 
 /**
  * OpenAI流处理器上下文
@@ -15,37 +16,25 @@ import * as logger from "../logger/logger.ts";
  * 2. 状态封装：所有处理状态统一管理
  * 3. 格式转换：Anthropic SSE事件 → OpenAI delta格式
  */
-export class OpenAIStreamProcessorContext {
+export class OpenAIStreamProcessorContext extends BaseStreamProcessor {
   // 请求信息
   public readonly openaiReq: OpenAIRequest;
-  public readonly tokenWithUsage: TokenWithUsage;
-  public readonly messageId: string;
-  public readonly requestId: string;
 
   // 流解析器
-  private readonly binaryParser: RobustEventStreamParser;
+  protected readonly binaryParser: RobustEventStreamParser;
 
   // 工具调用映射
   private readonly toolIndexByToolUseId = new Map<string, number>();
-  private readonly toolUseIdByBlockIndex = new Map<number, string>();
   private nextToolIndex = 0;
   private sawToolUse = false;
-
-  // 异常处理
-  private forcedFinishReason: string | null = null;
-
-  // 统计信息
-  public totalProcessedEvents = 0;
 
   constructor(
     openaiReq: OpenAIRequest,
     tokenWithUsage: TokenWithUsage,
     requestId: string,
   ) {
+    super(tokenWithUsage, `chatcmpl-${Date.now()}`, requestId);
     this.openaiReq = openaiReq;
-    this.tokenWithUsage = tokenWithUsage;
-    this.requestId = requestId;
-    this.messageId = `chatcmpl-${Date.now()}`;
     this.binaryParser = new RobustEventStreamParser();
   }
 
@@ -55,13 +44,12 @@ export class OpenAIStreamProcessorContext {
   cleanup(): void {
     this.binaryParser.reset();
     this.toolIndexByToolUseId.clear();
-    this.toolUseIdByBlockIndex.clear();
   }
 
   /**
    * 发送初始事件
    */
-  sendInitialEvent(controller: ReadableStreamDefaultController, encoder: TextEncoder): void {
+  sendInitialEvents(controller: ReadableStreamDefaultController, encoder: TextEncoder): void {
     const initialEvent = {
       id: this.messageId,
       object: "chat.completion.chunk",
@@ -91,14 +79,8 @@ export class OpenAIStreamProcessorContext {
     controller: ReadableStreamDefaultController,
     encoder: TextEncoder,
   ): boolean {
-    // 解析 payload
-    let event: Record<string, unknown>;
-    try {
-      const payload = JSON.parse(new TextDecoder().decode(message.payload));
-      event = payload.assistantResponseEvent || payload;
-    } catch {
-      return false;
-    }
+    const event = this.parsePayload(message.payload);
+    if (!event) return false;
 
     // 检查是否为异常事件
     if (this.handleExceptionEvent(event, controller, encoder)) {
@@ -194,20 +176,12 @@ export class OpenAIStreamProcessorContext {
     controller: ReadableStreamDefaultController,
     encoder: TextEncoder,
   ): boolean {
-    // 提取异常类型
-    const exceptionType = (event.exception_type as string) || (event.__type as string);
+    if (!this.isContentLengthException(event)) {
+      return false;
+    }
 
-    // 检查是否为内容长度超限异常
-    if (
-      exceptionType === "ContentLengthExceededException" ||
-      exceptionType?.includes("CONTENT_LENGTH_EXCEEDS")
-    ) {
-      logger.info(
-        "检测到内容长度超限异常，映射为length finish_reason",
-        logger.String("request_id", this.requestId),
-        logger.String("exception_type", exceptionType),
-        logger.String("openai_finish_reason", "length"),
-      );
+    const exceptionType = (event.exception_type as string) || (event.__type as string);
+    this.logException(exceptionType, "length");
 
       // 强制设置 finish_reason 为 length（OpenAI格式）
       this.forcedFinishReason = "length";
@@ -228,16 +202,12 @@ export class OpenAIStreamProcessorContext {
       controller.enqueue(encoder.encode("data: [DONE]\n\n"));
 
       return true; // 已处理异常，终止流
-    }
-
-    // 其他类型的异常，不处理
-    return false;
   }
 
   /**
    * 发送结束事件
    */
-  sendFinalEvent(controller: ReadableStreamDefaultController, encoder: TextEncoder): void {
+  sendFinalEvents(controller: ReadableStreamDefaultController, encoder: TextEncoder): void {
     // 优先使用强制设置的 finish_reason（用于异常处理）
     const finishReason = this.forcedFinishReason || (this.sawToolUse ? "tool_calls" : "stop");
     
@@ -264,46 +234,7 @@ export class OpenAIStreamProcessorContext {
     );
   }
 
-  /**
-   * 处理事件流
-   */
-  async processEventStream(
-    reader: ReadableStreamDefaultReader<Uint8Array>,
-    controller: ReadableStreamDefaultController,
-  ): Promise<void> {
-    const encoder = new TextEncoder();
-    let shouldTerminate = false;
 
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-
-      // 直接解析二进制数据
-      const messages = this.binaryParser.parseStream(value);
-
-      for (const message of messages) {
-        shouldTerminate = this.processMessage(message, controller, encoder);
-        if (shouldTerminate) {
-          logger.info(
-            "检测到终止信号，停止OpenAI流处理",
-            logger.String("request_id", this.requestId),
-          );
-          break;
-        }
-      }
-
-      // 如果检测到终止信号，跳出读取循环
-      if (shouldTerminate) {
-        break;
-      }
-    }
-
-    logger.debug(
-      "OpenAI响应流结束",
-      logger.String("request_id", this.requestId),
-      logger.Bool("terminated_by_exception", shouldTerminate),
-    );
-  }
 }
 
 /**
@@ -372,14 +303,18 @@ export async function handleOpenAIStreamRequest(
         const encoder = new TextEncoder();
 
         // 发送初始事件
-        ctx.sendInitialEvent(controller, encoder);
+        ctx.sendInitialEvents(controller, encoder);
 
         // 处理事件流
         const reader = upstreamResponse.body!.getReader();
-        await ctx.processEventStream(reader, controller);
+        await ctx.processEventStream(
+          reader,
+          controller,
+          (chunk) => ctx.binaryParser.parseStream(chunk),
+        );
 
         // 发送结束事件
-        ctx.sendFinalEvent(controller, encoder);
+        ctx.sendFinalEvents(controller, encoder);
 
         controller.close();
       } catch (error) {

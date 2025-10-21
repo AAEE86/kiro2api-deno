@@ -1,6 +1,6 @@
 import type { AnthropicRequest } from "../types/anthropic.ts";
 import type { TokenWithUsage } from "../types/common.ts";
-import { TokenEstimator } from "../utils/token_estimator.ts";
+import { calculateInputTokens } from "../utils/token_calculation.ts";
 import { SSEStateManager } from "./sse_state_manager.ts";
 import { StopReasonManager, getStopReasonDescription } from "./stop_reason_manager.ts";
 import { ErrorMapper } from "./error_mapper.ts";
@@ -10,6 +10,7 @@ import { StreamEventConverter } from "./stream_event_converter.ts";
 import { StreamTokenManager } from "./stream_token_manager.ts";
 import { StreamTimeoutController } from "./stream_timeout_controller.ts";
 import { StreamBufferProcessor } from "./stream_buffer_processor.ts";
+import { BaseStreamProcessor } from "./base_stream_processor.ts";
 
 /**
  * 流处理器上下文（重构版）
@@ -21,12 +22,9 @@ import { StreamBufferProcessor } from "./stream_buffer_processor.ts";
  * 3. 性能优化：使用增量解析和缓冲区复用
  * 4. 可测试性：每个管理器可独立测试
  */
-export class StreamProcessorContext {
+export class StreamProcessorContext extends BaseStreamProcessor {
   // 请求信息
   public readonly anthropicReq: AnthropicRequest;
-  public readonly tokenWithUsage: TokenWithUsage;
-  public readonly messageId: string;
-  public readonly requestId: string;
   public readonly inputTokens: number;
 
   // 专门的管理器（职责分离）
@@ -47,10 +45,8 @@ export class StreamProcessorContext {
     requestId: string,
     inputTokens: number,
   ) {
+    super(tokenWithUsage, messageId, requestId);
     this.anthropicReq = anthropicReq;
-    this.tokenWithUsage = tokenWithUsage;
-    this.messageId = messageId;
-    this.requestId = requestId;
     this.inputTokens = inputTokens;
 
     // 初始化所有管理器
@@ -77,8 +73,10 @@ export class StreamProcessorContext {
   /**
    * 发送初始事件
    */
-  sendInitialEvents(controller: ReadableStreamDefaultController): void {
-    const encoder = new TextEncoder();
+  sendInitialEvents(
+    controller: ReadableStreamDefaultController,
+    encoder: TextEncoder,
+  ): void {
 
     // message_start事件
     const startEvent = {
@@ -161,14 +159,8 @@ export class StreamProcessorContext {
     controller: ReadableStreamDefaultController,
     encoder: TextEncoder,
   ): boolean {
-    // 解析 payload 获取事件数据
-    let event: Record<string, unknown>;
-    try {
-      const payload = JSON.parse(new TextDecoder().decode(message.payload));
-      event = payload.assistantResponseEvent || payload;
-    } catch {
-      return false;
-    }
+    const event = this.parsePayload(message.payload);
+    if (!event) return false;
 
     // 检查是否为异常事件
     if (this.handleExceptionEvent(event, controller, encoder)) {
@@ -236,20 +228,12 @@ export class StreamProcessorContext {
     controller: ReadableStreamDefaultController,
     encoder: TextEncoder,
   ): boolean {
-    // 提取异常类型
-    const exceptionType = (event.exception_type as string) || (event.__type as string);
+    if (!this.isContentLengthException(event)) {
+      return false;
+    }
 
-    // 检查是否为内容长度超限异常
-    if (
-      exceptionType === "ContentLengthExceededException" ||
-      exceptionType?.includes("CONTENT_LENGTH_EXCEEDS")
-    ) {
-      logger.info(
-        "检测到内容长度超限异常，映射为max_tokens stop_reason",
-        logger.String("request_id", this.requestId),
-        logger.String("exception_type", exceptionType),
-        logger.String("claude_stop_reason", "max_tokens"),
-      );
+    const exceptionType = (event.exception_type as string) || (event.__type as string);
+    this.logException(exceptionType, "max_tokens");
 
       // 强制设置 stop_reason 为 max_tokens
       this.stopReasonManager.forceStopReason("max_tokens");
@@ -305,18 +289,16 @@ export class StreamProcessorContext {
       }
 
       return true; // 已处理异常，终止流
-    }
-
-    // 其他类型的异常，不处理
-    return false;
   }
 
 
   /**
    * 发送结束事件
    */
-  sendFinalEvents(controller: ReadableStreamDefaultController): void {
-    const encoder = new TextEncoder();
+  sendFinalEvents(
+    controller: ReadableStreamDefaultController,
+    encoder: TextEncoder,
+  ): void {
 
     // 关闭文本块（如果已启动）
     if (this.eventConverter.isTextBlockStarted()) {
@@ -402,9 +384,9 @@ export class StreamProcessorContext {
 
 
   /**
-   * 处理事件流
+   * 处理事件流（带超时控制）
    */
-  async processEventStream(
+  async processEventStreamWithTimeout(
     reader: ReadableStreamDefaultReader<Uint8Array>,
     controller: ReadableStreamDefaultController,
   ): Promise<void> {
@@ -413,38 +395,21 @@ export class StreamProcessorContext {
 
     try {
       while (true) {
-        // 检查超时
         this.timeoutController.checkTimeouts();
-
-        // 带超时的读取
         const { done, value } = await this.timeoutController.readWithTimeout(reader);
-        
-        // 清除读取超时定时器
         this.timeoutController.clearReadTimeout();
 
         if (done) break;
 
-        // 更新读取时间和字节数
         this.timeoutController.updateReadStats(value.length);
-
-        // 使用优化的缓冲处理器解析
         const messages = this.bufferProcessor.processChunk(value);
 
         for (const message of messages) {
           shouldTerminate = this.processMessage(message, controller, encoder);
-          if (shouldTerminate) {
-            logger.info(
-              "检测到终止信号，停止流处理",
-              logger.String("request_id", this.requestId),
-            );
-            break;
-          }
+          if (shouldTerminate) break;
         }
 
-        // 如果检测到终止信号，跳出读取循环
-        if (shouldTerminate) {
-          break;
-        }
+        if (shouldTerminate) break;
       }
 
       const stats = this.timeoutController.getStats();
@@ -484,17 +449,7 @@ export function handleStreamRequest(
   const messageId = `msg_${crypto.randomUUID().replace(/-/g, "")}`;
 
   // 计算输入tokens
-  const estimator = new TokenEstimator();
-  const systemMessages = anthropicReq.system
-    ? typeof anthropicReq.system === "string"
-      ? [{ text: anthropicReq.system }]
-      : anthropicReq.system.map(s => ({ text: typeof s === "string" ? s : s.text }))
-    : undefined;
-  const inputTokens = estimator.estimateTokens({
-    system: systemMessages,
-    messages: anthropicReq.messages,
-    tools: anthropicReq.tools,
-  });
+  const inputTokens = calculateInputTokens(anthropicReq);
 
   const stream = new ReadableStream({
     async start(controller) {
@@ -522,15 +477,17 @@ export function handleStreamRequest(
           return;
         }
 
+        const encoder = new TextEncoder();
+
         // 发送初始事件
-        ctx.sendInitialEvents(controller);
+        ctx.sendInitialEvents(controller, encoder);
 
         // 处理事件流
         const reader = upstreamResponse.body.getReader();
-        await ctx.processEventStream(reader, controller);
+        await ctx.processEventStreamWithTimeout(reader, controller);
 
         // 发送结束事件
-        ctx.sendFinalEvents(controller);
+        ctx.sendFinalEvents(controller, encoder);
 
         controller.close();
       } catch (error) {

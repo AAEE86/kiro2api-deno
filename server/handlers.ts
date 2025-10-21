@@ -2,14 +2,16 @@ import type { AnthropicRequest } from "../types/anthropic.ts";
 import type { TokenInfo } from "../types/common.ts";
 import { AuthService } from "../auth/auth_service.ts";
 import { anthropicToCodeWhisperer, generateId } from "../converter/converter.ts";
-import { AWS_ENDPOINTS, MODEL_MAP } from "../config/constants.ts";
-import { TokenEstimator } from "../utils/token_estimator.ts";
+import { MODEL_MAP } from "../config/constants.ts";
 import { handleStreamRequest } from "./stream_processor.ts";
 import { respondError } from "./common.ts";
 import * as logger from "../logger/logger.ts";
 import type { TokenWithUsage } from "../types/common.ts";
 import { RobustEventStreamParser } from "../parser/robust_parser.ts";
-import { isObject, isString, parseJsonSafely, extractToolInput } from "../types/guards.ts";
+import { calculateInputTokens, calculateOutputTokens } from "../utils/token_calculation.ts";
+import { parseEventStreamResponse } from "../utils/response_parser.ts";
+import { sendCodeWhispererRequest } from "../utils/codewhisperer_client.ts";
+import { createCodeWhispererHeaders } from "../utils/request_headers.ts";
 
 // Handle /v1/models endpoint
 export function handleModels(): Response {
@@ -86,15 +88,9 @@ async function handleStreamingRequest(
     logger.String("model", anthropicReq.model),
   );
 
-  const upstreamResponse = await fetch(AWS_ENDPOINTS.CODEWHISPERER, {
+  const upstreamResponse = await fetch("https://codewhisperer.us-east-1.amazonaws.com/", {
     method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      "Authorization": `Bearer ${tokenWithUsage.tokenInfo.accessToken}`,
-      "x-amzn-kiro-agent-mode": "spec",
-      "x-amz-user-agent": "aws-sdk-js/1.0.18 KiroIDE-0.2.13-66c23a8c5d15afabec89ef9954ef52a119f10d369df04d548fc6c1eac694b0d1",
-      "user-agent": "aws-sdk-js/1.0.18 ua/2.1 os/darwin#25.0.0 lang/js md/nodejs#20.16.0 api/codewhispererstreaming#1.0.18 m/E KiroIDE-0.2.13-66c23a8c5d15afabec89ef9954ef52a119f10d369df04d548fc6c1eac694b0d1",
-    },
+    headers: createCodeWhispererHeaders(tokenWithUsage.tokenInfo.accessToken),
     body: JSON.stringify(cwReq),
   });
 
@@ -116,99 +112,22 @@ async function handleNonStreamRequest(
   const conversationId = crypto.randomUUID();
   const cwReq = anthropicToCodeWhisperer(anthropicReq, conversationId);
 
-  // Calculate input tokens using TokenEstimator
-  const estimator = new TokenEstimator();
-  const systemMessages = anthropicReq.system
-    ? typeof anthropicReq.system === "string"
-      ? [{ text: anthropicReq.system }]
-      : anthropicReq.system.map(s => ({ text: typeof s === "string" ? s : s.text }))
-    : undefined;
-  const inputTokens = estimator.estimateTokens({
-    system: systemMessages,
-    messages: anthropicReq.messages,
-    tools: anthropicReq.tools,
-  });
+  // Calculate input tokens
+  const inputTokens = calculateInputTokens(anthropicReq);
 
-  const reqStr = JSON.stringify(cwReq, null, 2);
   logger.debug(
     "发送请求到 CodeWhisperer",
     logger.String("request_id", requestId),
-    logger.String("direction", "upstream_request"),
-    logger.Int("request_size", reqStr.length),
     logger.Int("input_tokens", inputTokens),
   );
 
-  // Debug: Log full request for tool use debugging
-  if (Deno.env.get("DEBUG_TOOLS") === "true") {
-    logger.debug("完整请求", logger.Any("request", JSON.parse(reqStr)));
-  }
+  const response = await sendCodeWhispererRequest(cwReq, tokenInfo.accessToken, requestId);
 
-  // Log tool information if present
-  const tools =
-    cwReq.conversationState.currentMessage.userInputMessage.userInputMessageContext.tools;
-  const toolResults =
-    cwReq.conversationState.currentMessage.userInputMessage.userInputMessageContext.toolResults;
-  if (tools && tools.length > 0) {
-    logger.debug("工具定义", logger.Int("tool_count", tools.length));
-    // Log first tool schema for debugging
-    if (tools[0]) {
-      logger.debug(
-        "第一个工具模式示例",
-        logger.Any(
-          "schema",
-          JSON.stringify(tools[0].toolSpecification.inputSchema.json, null, 2).substring(0, 500),
-        ),
-      );
-    }
-  }
-  if (toolResults && toolResults.length > 0) {
-    logger.debug("工具结果", logger.Int("result_count", toolResults.length));
-    logger.debug("工具结果详情", logger.Any("results", toolResults));
-  }
-
-  // Log history summary
-  const history = cwReq.conversationState.history;
-  if (history && history.length > 0) {
-    logger.debug("历史消息", logger.Int("history_count", history.length));
-    // Check for tool uses in history
-    const historyWithTools = history.filter((h: unknown) => {
-      const msg = h as { assistantResponseMessage?: { toolUses?: unknown[] } };
-      return msg.assistantResponseMessage?.toolUses?.length ?? 0 > 0;
-    });
-    if (historyWithTools.length > 0) {
-      logger.debug("历史包含工具使用", logger.Int("tool_use_messages", historyWithTools.length));
-    }
-  }
-
-  const response = await fetch(AWS_ENDPOINTS.CODEWHISPERER, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      "Authorization": `Bearer ${tokenInfo.accessToken}`,
-      "x-amzn-kiro-agent-mode": "spec",
-      "x-amz-user-agent": "aws-sdk-js/1.0.18 KiroIDE-0.2.13-66c23a8c5d15afabec89ef9954ef52a119f10d369df04d548fc6c1eac694b0d1",
-      "user-agent": "aws-sdk-js/1.0.18 ua/2.1 os/darwin#25.0.0 lang/js md/nodejs#20.16.0 api/codewhispererstreaming#1.0.18 m/E KiroIDE-0.2.13-66c23a8c5d15afabec89ef9954ef52a119f10d369df04d548fc6c1eac694b0d1",
-    },
-    body: JSON.stringify(cwReq),
-  });
-
-  if (!response.ok) {
-    const errorText = await response.text();
-    logger.error(
-      "CodeWhisperer API 错误",
-      logger.Int("status", response.status),
-      logger.String("error", errorText),
-    );
-    logger.debug("失败的请求", logger.String("request", reqStr));
-    throw new Error(`CodeWhisperer API error: ${response.status}`);
-  }
-
-  // Read response as binary (AWS EventStream format)
+  // Read and parse response
   const responseBuffer = await response.arrayBuffer();
   const data = new Uint8Array(responseBuffer);
   logger.debug("CodeWhisperer 响应大小", logger.Int("size", data.length));
 
-  // Use RobustEventStreamParser for parsing - reduces CPU usage by 30-40%
   const parser = new RobustEventStreamParser();
   const messages = parser.parseStream(data);
   
@@ -218,92 +137,8 @@ async function handleNonStreamRequest(
     logger.Int("message_count", messages.length),
   );
 
-  // Extract content and tool uses from parsed messages
-  let content = "";
-  const toolUsesMap = new Map<string, { type: string; id: string; name: string; input: unknown }>();
-  const toolInputBuffers = new Map<string, string>();
-
-  for (const message of messages) {
-    try {
-      const payloadStr = new TextDecoder().decode(message.payload);
-      const payload = parseJsonSafely(payloadStr);
-      
-      if (!isObject(payload)) continue;
-      
-      const event = isObject(payload.assistantResponseEvent) 
-        ? payload.assistantResponseEvent 
-        : payload;
-      
-      if (!isObject(event)) continue;
-
-      // Extract content
-      if (isString(event.content)) {
-        content += event.content;
-      }
-
-      // Extract tool use information
-      if (isString(event.toolUseId) && isString(event.name)) {
-        const toolId = event.toolUseId;
-        const toolName = event.name;
-
-        // Filter web_search
-        if (toolName === "web_search" || toolName === "websearch") {
-          continue;
-        }
-
-        // Get or create tool entry
-        if (!toolUsesMap.has(toolId)) {
-          toolUsesMap.set(toolId, {
-            type: "tool_use",
-            id: toolId,
-            name: toolName,
-            input: {},
-          });
-          toolInputBuffers.set(toolId, "");
-        }
-
-        // Accumulate input
-        if (event.input !== undefined && event.input !== null) {
-          const tool = toolUsesMap.get(toolId)!;
-
-          if (isObject(event.input)) {
-            tool.input = event.input;
-          } else if (isString(event.input)) {
-            const currentBuffer = toolInputBuffers.get(toolId) || "";
-            toolInputBuffers.set(toolId, currentBuffer + event.input);
-          }
-        }
-
-        // When tool stops, try to parse accumulated input
-        if (event.stop === true) {
-          const tool = toolUsesMap.get(toolId);
-          const inputBuffer = toolInputBuffers.get(toolId);
-
-          if (tool && inputBuffer && inputBuffer.trim()) {
-            tool.input = extractToolInput(inputBuffer);
-          }
-        }
-      }
-    } catch (e) {
-      logger.debug(
-        "跳过无效消息",
-        logger.String("request_id", requestId),
-        logger.Err(e),
-      );
-    }
-  }
-
-  // Final pass: parse any remaining buffered inputs
-  for (const [toolId, buffer] of toolInputBuffers.entries()) {
-    if (buffer && buffer.trim()) {
-      const tool = toolUsesMap.get(toolId);
-      if (tool && isObject(tool.input) && Object.keys(tool.input).length === 0) {
-        tool.input = extractToolInput(buffer);
-      }
-    }
-  }
-
-  const toolUses = Array.from(toolUsesMap.values());
+  // Parse content and tool uses
+  const { content, toolUses } = parseEventStreamResponse(messages, requestId);
 
   logger.debug(
     "提取内容",
@@ -330,31 +165,8 @@ async function handleNonStreamRequest(
   }
   contentBlocks.push(...toolUses);
 
-  // Calculate output tokens using TokenEstimator
-  let outputTokens = 0;
-  for (const contentBlock of contentBlocks) {
-    const blockType = contentBlock.type;
-
-    switch (blockType) {
-      case "text":
-        if (contentBlock.text) {
-          outputTokens += estimator.estimateTextTokens(contentBlock.text);
-        }
-        break;
-
-      case "tool_use":
-        if (contentBlock.name) {
-          outputTokens += estimator.estimateToolUseTokens(
-            contentBlock.name,
-            contentBlock.input as Record<string, unknown> || {},
-          );
-        }
-        break;
-    }
-  }
-
-  // Minimum token protection
-  outputTokens = Math.max(1, outputTokens);
+  // Calculate output tokens
+  const outputTokens = calculateOutputTokens(contentBlocks);
 
   logger.debug(
     "Token统计",

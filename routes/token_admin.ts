@@ -3,6 +3,7 @@ import type { AuthConfig } from "../auth/config.ts";
 import { getCORSHeaders } from "../server/middleware.ts";
 import { AuthService } from "../auth/auth_service.ts";
 import * as logger from "../logger/logger.ts";
+import { createTokenPreview } from "../utils/privacy.ts";
 
 /**
  * 获取所有 tokens
@@ -18,7 +19,7 @@ export async function handleGetTokens(_req: Request, _authService?: AuthService)
     // 脱敏处理，不返回完整的 refreshToken
     const sanitizedConfigs = (configs || []).map(config => ({
       auth: config.auth,
-      refreshToken: maskToken(config.refreshToken),
+      refreshToken: createTokenPreview(config.refreshToken),
       clientId: config.clientId,
       disabled: config.disabled,
       description: config.description,
@@ -320,8 +321,4 @@ export async function handleClearTokens(_req: Request, authService?: AuthService
   }
 }
 
-// 工具函数：脱敏 token，只显示前后几位
-function maskToken(token: string): string {
-  if (!token || token.length < 10) return "***";
-  return `${token.substring(0, 6)}...${token.substring(token.length - 4)}`;
-}
+

@@ -2,11 +2,12 @@ import type { OpenAIRequest, OpenAIResponse, OpenAIMessage, OpenAIToolCall } fro
 import type { TokenInfo, TokenWithUsage } from "../types/common.ts";
 import { openAIToAnthropic } from "../converter/converter.ts";
 import { anthropicToCodeWhisperer, generateId } from "../converter/converter.ts";
-import { AWS_ENDPOINTS } from "../config/constants.ts";
-import { TokenEstimator } from "../utils/token_estimator.ts";
 import { respondError } from "./common.ts";
 import { handleOpenAIStreamRequest as streamProcessor } from "./openai_stream_processor.ts";
 import * as logger from "../logger/logger.ts";
+import { calculateInputTokens, calculateOutputTokens } from "../utils/token_calculation.ts";
+import { parseEventStreamBinary } from "../utils/response_parser.ts";
+import { sendCodeWhispererRequest } from "../utils/codewhisperer_client.ts";
 
 // 处理OpenAI非流式请求
 export async function handleOpenAINonStreamRequest(
@@ -22,98 +23,23 @@ export async function handleOpenAINonStreamRequest(
     const conversationId = crypto.randomUUID();
     const cwReq = anthropicToCodeWhisperer(anthropicReq, conversationId);
 
-    // Calculate input tokens using TokenEstimator
-    const estimator = new TokenEstimator();
-    const systemMessages = anthropicReq.system
-      ? typeof anthropicReq.system === "string"
-        ? [{ text: anthropicReq.system }]
-        : anthropicReq.system.map(s => ({ text: typeof s === "string" ? s : s.text }))
-      : undefined;
-    const inputTokens = estimator.estimateTokens({
-      system: systemMessages,
-      messages: anthropicReq.messages,
-      tools: anthropicReq.tools,
-    });
+    // Calculate input tokens
+    const inputTokens = calculateInputTokens(anthropicReq);
 
     logger.debug(
       "发送OpenAI请求到 CodeWhisperer",
       logger.String("request_id", rid),
-      logger.String("direction", "upstream_request"),
       logger.String("model", openaiReq.model),
       logger.Int("input_tokens", inputTokens),
     );
 
-    const response = await fetch(AWS_ENDPOINTS.CODEWHISPERER, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "Authorization": `Bearer ${tokenInfo.accessToken}`,
-        "x-amzn-kiro-agent-mode": "spec",
-        "x-amz-user-agent": "aws-sdk-js/1.0.18 KiroIDE-0.2.13-66c23a8c5d15afabec89ef9954ef52a119f10d369df04d548fc6c1eac694b0d1",
-        "user-agent": "aws-sdk-js/1.0.18 ua/2.1 os/darwin#25.0.0 lang/js md/nodejs#20.16.0 api/codewhispererstreaming#1.0.18 m/E KiroIDE-0.2.13-66c23a8c5d15afabec89ef9954ef52a119f10d369df04d548fc6c1eac694b0d1",
-      },
-      body: JSON.stringify(cwReq),
-    });
+    const response = await sendCodeWhispererRequest(cwReq, tokenInfo.accessToken, rid);
 
-    if (!response.ok) {
-      throw new Error(`CodeWhisperer API error: ${response.status}`);
-    }
-
-    // 读取响应
+    // 读取和解析响应
     const responseBuffer = await response.arrayBuffer();
     const data = new Uint8Array(responseBuffer);
 
-    // 解析响应
-    let content = "";
-    const toolUsesMap = new Map<string, { type: string; id: string; name: string; input: unknown }>();
-    let offset = 0;
-
-    while (offset < data.length) {
-      if (offset + 16 > data.length) break;
-
-      const totalLength = new DataView(data.buffer, offset, 4).getUint32(0, false);
-      const headerLength = new DataView(data.buffer, offset + 4, 4).getUint32(0, false);
-
-      if (offset + totalLength > data.length) break;
-
-      const payloadStart = offset + 12 + headerLength;
-      const payloadEnd = offset + totalLength - 4;
-      const payloadData = data.slice(payloadStart, payloadEnd);
-
-      try {
-        const payload = JSON.parse(new TextDecoder().decode(payloadData));
-        const event = payload.assistantResponseEvent || payload;
-
-        if (event.content) {
-          content += event.content;
-        }
-
-        if (event.toolUseId && event.name) {
-          const toolId = event.toolUseId;
-          if (!toolUsesMap.has(toolId)) {
-            toolUsesMap.set(toolId, {
-              type: "tool_use",
-              id: toolId,
-              name: event.name,
-              input: {},
-            });
-          }
-
-          if (event.input !== undefined && event.input !== null) {
-            const tool = toolUsesMap.get(toolId)!;
-            if (typeof event.input === "object") {
-              tool.input = event.input;
-            }
-          }
-        }
-      } catch {
-        // Skip invalid payload
-      }
-
-      offset += totalLength;
-    }
-
-    const toolUses = Array.from(toolUsesMap.values());
+    const { content, toolUses } = parseEventStreamBinary(data);
 
     // Build content blocks
     const contentBlocks: Array<{ type: string; text?: string; id?: string; name?: string; input?: unknown }> = [
@@ -121,31 +47,8 @@ export async function handleOpenAINonStreamRequest(
       ...toolUses,
     ];
 
-    // Calculate output tokens using TokenEstimator
-    let outputTokens = 0;
-    for (const contentBlock of contentBlocks) {
-      const blockType = contentBlock.type;
-
-      switch (blockType) {
-        case "text":
-          if (contentBlock.text) {
-            outputTokens += estimator.estimateTextTokens(contentBlock.text);
-          }
-          break;
-
-        case "tool_use":
-          if (contentBlock.name) {
-            outputTokens += estimator.estimateToolUseTokens(
-              contentBlock.name,
-              contentBlock.input as Record<string, unknown> || {},
-            );
-          }
-          break;
-      }
-    }
-
-    // Minimum token protection
-    outputTokens = Math.max(1, outputTokens);
+    // Calculate output tokens
+    const outputTokens = calculateOutputTokens(contentBlocks);
 
     logger.debug(
       "OpenAI非流式响应Token统计",

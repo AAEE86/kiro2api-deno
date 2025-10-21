@@ -1,4 +1,5 @@
 import * as logger from "../logger/logger.ts";
+import { createTokenPreview, maskEmail } from "../utils/privacy.ts";
 
 /**
  * 标准化错误响应
@@ -110,54 +111,5 @@ export function extractRelevantHeaders(headers: Headers): Record<string, string>
   return relevantHeaders;
 }
 
-// 创建token预览
-export function createTokenPreview(token: string): string {
-  if (token.length <= 10) {
-    return "*".repeat(token.length);
-  }
-  return "***" + token.substring(token.length - 10);
-}
-
-// 邮箱脱敏
-export function maskEmail(email: string): string {
-  if (!email) return "";
-
-  const parts = email.split("@");
-  if (parts.length !== 2) {
-    return email;
-  }
-
-  const username = parts[0];
-  const domain = parts[1];
-
-  // 处理用户名部分
-  let maskedUsername: string;
-  if (username.length <= 4) {
-    maskedUsername = "*".repeat(username.length);
-  } else {
-    const prefix = username.substring(0, 2);
-    const suffix = username.substring(username.length - 2);
-    const middleLen = username.length - 4;
-    maskedUsername = prefix + "*".repeat(middleLen) + suffix;
-  }
-
-  // 处理域名部分
-  const domainParts = domain.split(".");
-  let maskedDomain: string;
-
-  if (domainParts.length === 1) {
-    maskedDomain = "*".repeat(domain.length);
-  } else if (domainParts.length === 2) {
-    maskedDomain = "*".repeat(domainParts[0].length) + "." + domainParts[1];
-  } else {
-    const maskedParts = domainParts.map((part, i) => {
-      if (i < domainParts.length - 2) {
-        return "*".repeat(part.length);
-      }
-      return part;
-    });
-    maskedDomain = maskedParts.join(".");
-  }
-
-  return maskedUsername + "@" + maskedDomain;
-}
+// Re-export privacy utilities for convenience
+export { createTokenPreview, maskEmail };
