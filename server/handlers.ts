@@ -2,7 +2,7 @@ import type { AnthropicRequest } from "../types/anthropic.ts";
 import type { TokenInfo } from "../types/common.ts";
 import { AuthService } from "../auth/auth_service.ts";
 import { anthropicToCodeWhisperer, generateId } from "../converter/converter.ts";
-import { MODEL_MAP } from "../config/constants.ts";
+import { MODEL_MAP, AWS_ENDPOINTS } from "../config/constants.ts";
 import { handleStreamRequest } from "./stream_processor.ts";
 import { respondError } from "./common.ts";
 import * as logger from "../logger/logger.ts";
@@ -88,7 +88,7 @@ async function handleStreamingRequest(
     logger.String("model", anthropicReq.model),
   );
 
-  const upstreamResponse = await fetch("https://codewhisperer.us-east-1.amazonaws.com/", {
+  const upstreamResponse = await fetch(AWS_ENDPOINTS.CODEWHISPERER, {
     method: "POST",
     headers: createCodeWhispererHeaders(tokenWithUsage.tokenInfo.accessToken),
     body: JSON.stringify(cwReq),
