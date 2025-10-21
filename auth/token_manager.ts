@@ -1,6 +1,7 @@
 import type { AuthConfig } from "./config.ts";
 import type { TokenInfo, TokenWithUsage } from "../types/common.ts";
 import * as logger from "../logger/logger.ts";
+import { errorTracker, ErrorCategory } from "../logger/error_tracker.ts";
 import { UsageLimitsChecker, calculateAvailableCount } from "./usage_checker.ts";
 import { createTokenPreview, maskEmail, maskClientId } from "../utils/privacy.ts";
 import { TokenCache } from "./token_cache.ts";
@@ -37,35 +38,86 @@ export class TokenManager {
   }
 
   async warmupAllTokens(): Promise<void> {
-    logger.info(`开始预热 ${this.configs.length} 个 token...`);
+    const startTime = Date.now();
+    logger.info(
+      `开始预热 Token`,
+      logger.Int("total", this.configs.length),
+    );
     
     const results = await Promise.allSettled(
       this.configs.map(async (config, index) => {
-        const cached = await this.refresher.refresh(index, config);
-        this.cache.set(index, cached);
-        this.selector.removeFromExhausted(index);
-        logger.info(`Token ${index + 1}/${this.configs.length} 预热成功`);
+        try {
+          const cached = await this.refresher.refresh(index, config);
+          this.cache.set(index, cached);
+          this.selector.removeFromExhausted(index);
+          logger.debug(
+            `Token 预热成功`,
+            logger.Int("index", index),
+            logger.String("auth_type", config.auth),
+          );
+        } catch (error) {
+          errorTracker.track(
+            ErrorCategory.AUTH_REFRESH_FAILED,
+            `Token 预热失败 (index: ${index})`,
+            error,
+            undefined,
+            { index, authType: config.auth },
+          );
+          throw error;
+        }
       })
     );
     
     const successful = results.filter(r => r.status === 'fulfilled').length;
     const failed = results.filter(r => r.status === 'rejected').length;
+    const duration = Date.now() - startTime;
     
     logger.info(
       `Token 预热完成`,
       logger.Int("total", this.configs.length),
       logger.Int("successful", successful),
-      logger.Int("failed", failed)
+      logger.Int("failed", failed),
+      logger.Duration("duration", duration),
     );
+    
+    if (failed > 0) {
+      logger.warn(
+        `有 Token 预热失败`,
+        logger.Int("failed_count", failed),
+      );
+    }
   }
 
   async getBestToken(): Promise<TokenInfo> {
+    logger.debug("请求获取最佳 Token");
     const result = await this.getBestTokenWithUsage();
     return result.tokenInfo;
   }
 
   async getBestTokenWithUsage(): Promise<TokenWithUsage> {
-    return await this.selector.selectBest();
+    const startTime = Date.now();
+    try {
+      const result = await this.selector.selectBest();
+      const duration = Date.now() - startTime;
+      
+      logger.debug(
+        "获取最佳 Token 成功",
+        logger.Duration("duration", duration),
+        logger.Int("remaining_usage", result.usageLimits?.availableCount || 0),
+      );
+      
+      return result;
+    } catch (error) {
+      const duration = Date.now() - startTime;
+      errorTracker.track(
+        ErrorCategory.AUTH_NO_AVAILABLE_TOKEN,
+        "获取最佳 Token 失败",
+        error,
+        undefined,
+        { duration },
+      );
+      throw error;
+    }
   }
 
 

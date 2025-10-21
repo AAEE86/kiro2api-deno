@@ -3,6 +3,8 @@ import type { AuthConfig } from "../auth/config.ts";
 import { getCORSHeaders } from "../server/middleware.ts";
 import { AuthService } from "../auth/auth_service.ts";
 import * as logger from "../logger/logger.ts";
+import { metricsCollector } from "../logger/metrics.ts";
+import { errorTracker, ErrorCategory } from "../logger/error_tracker.ts";
 import { createTokenPreview } from "../utils/privacy.ts";
 
 /**
@@ -10,6 +12,9 @@ import { createTokenPreview } from "../utils/privacy.ts";
  */
 export async function handleGetTokens(_req: Request, _authService?: AuthService): Promise<Response> {
   const corsHeaders = getCORSHeaders();
+  const requestId = crypto.randomUUID();
+  
+  logger.debug("获取 Token 列表", logger.String("request_id", requestId));
 
   try {
     const kvStore = await KVStore.create();
@@ -25,6 +30,12 @@ export async function handleGetTokens(_req: Request, _authService?: AuthService)
       description: config.description,
     }));
 
+    logger.info(
+      "返回 Token 列表",
+      logger.String("request_id", requestId),
+      logger.Int("count", sanitizedConfigs.length),
+    );
+
     return new Response(JSON.stringify({ 
       success: true, 
       tokens: sanitizedConfigs,
@@ -34,7 +45,12 @@ export async function handleGetTokens(_req: Request, _authService?: AuthService)
       headers: { ...corsHeaders, "Content-Type": "application/json" },
     });
   } catch (error) {
-    logger.error("Failed to get tokens", logger.Err(error));
+    errorTracker.track(
+      ErrorCategory.SYSTEM_FILE_ERROR,
+      "获取 Token 列表失败",
+      error,
+      requestId,
+    );
     return new Response(JSON.stringify({ 
       success: false, 
       error: "Failed to get tokens" 
@@ -50,6 +66,9 @@ export async function handleGetTokens(_req: Request, _authService?: AuthService)
  */
 export async function handleAddToken(req: Request, authService?: AuthService): Promise<Response> {
   const corsHeaders = getCORSHeaders();
+  const requestId = crypto.randomUUID();
+  
+  logger.info("添加 Token", logger.String("request_id", requestId));
 
   try {
     const body = await req.json();
@@ -57,6 +76,12 @@ export async function handleAddToken(req: Request, authService?: AuthService): P
 
     // 验证必填字段
     if (!config.auth || !config.refreshToken) {
+      errorTracker.track(
+        ErrorCategory.REQUEST_INVALID_PARAMS,
+        "缺少必需字段",
+        new Error("Missing auth or refreshToken"),
+        requestId,
+      );
       return new Response(JSON.stringify({ 
         success: false, 
         error: "Missing required fields: auth, refreshToken" 
@@ -68,6 +93,12 @@ export async function handleAddToken(req: Request, authService?: AuthService): P
 
     // 验证 IdC 配置
     if (config.auth === "IdC" && (!config.clientId || !config.clientSecret)) {
+      errorTracker.track(
+        ErrorCategory.REQUEST_INVALID_PARAMS,
+        "IdC 配置缺少字段",
+        new Error("Missing clientId or clientSecret"),
+        requestId,
+      );
       return new Response(JSON.stringify({ 
         success: false, 
         error: "IdC auth requires clientId and clientSecret" 
@@ -86,9 +117,17 @@ export async function handleAddToken(req: Request, authService?: AuthService): P
       if (authService) {
         try {
           await authService.reload();
-          logger.info("已重新加载 AuthService");
+          logger.info(
+            "Token 添加成功，已重新加载 AuthService",
+            logger.String("request_id", requestId),
+            logger.String("auth_type", config.auth),
+          );
         } catch (error) {
-          logger.error("重新加载 AuthService 失败", logger.Err(error));
+          logger.error(
+            "重新加载 AuthService 失败",
+            logger.String("request_id", requestId),
+            logger.Err(error),
+          );
         }
       }
       
@@ -100,6 +139,12 @@ export async function handleAddToken(req: Request, authService?: AuthService): P
         headers: { ...corsHeaders, "Content-Type": "application/json" },
       });
     } else {
+      errorTracker.track(
+        ErrorCategory.SYSTEM_FILE_ERROR,
+        "添加 Token 失败",
+        new Error("KV store operation failed"),
+        requestId,
+      );
       return new Response(JSON.stringify({ 
         success: false, 
         error: "Failed to add token" 
@@ -109,7 +154,12 @@ export async function handleAddToken(req: Request, authService?: AuthService): P
       });
     }
   } catch (error) {
-    logger.error("Failed to add token", logger.Err(error));
+    errorTracker.track(
+      ErrorCategory.REQUEST_INVALID_PARAMS,
+      "解析请求体失败",
+      error,
+      requestId,
+    );
     return new Response(JSON.stringify({ 
       success: false, 
       error: "Invalid request body" 

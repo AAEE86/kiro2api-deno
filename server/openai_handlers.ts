@@ -5,6 +5,8 @@ import { anthropicToCodeWhisperer, generateId } from "../converter/converter.ts"
 import { respondError } from "./common.ts";
 import { handleOpenAIStreamRequest as streamProcessor } from "./openai_stream_processor.ts";
 import * as logger from "../logger/logger.ts";
+import { metricsCollector } from "../logger/metrics.ts";
+import { errorTracker, ErrorCategory } from "../logger/error_tracker.ts";
 import { calculateInputTokens, calculateOutputTokens } from "../utils/token_calculation.ts";
 import { parseEventStreamBinary } from "../utils/response_parser.ts";
 import { sendCodeWhispererRequest } from "../utils/codewhisperer_client.ts";
@@ -16,26 +18,33 @@ export async function handleOpenAINonStreamRequest(
   requestId?: string,
 ): Promise<Response> {
   const rid = requestId || crypto.randomUUID();
+  metricsCollector.startRequest(rid);
 
   try {
     // 转换为Anthropic格式
+    metricsCollector.startPhase(rid, "convert_request");
     const anthropicReq = openAIToAnthropic(openaiReq);
     const conversationId = crypto.randomUUID();
     const cwReq = anthropicToCodeWhisperer(anthropicReq, conversationId);
+    metricsCollector.endPhase(rid, "convert_request");
 
     // Calculate input tokens
     const inputTokens = calculateInputTokens(anthropicReq);
 
-    logger.debug(
-      "发送OpenAI请求到 CodeWhisperer",
+    logger.info(
+      "处理 OpenAI 非流式请求",
       logger.String("request_id", rid),
       logger.String("model", openaiReq.model),
       logger.Int("input_tokens", inputTokens),
+      logger.Bool("stream", false),
     );
 
+    metricsCollector.startPhase(rid, "upstream_request");
     const response = await sendCodeWhispererRequest(cwReq, tokenInfo.accessToken, rid);
+    metricsCollector.endPhase(rid, "upstream_request", { status: response.status });
 
     // 读取和解析响应
+    metricsCollector.startPhase(rid, "parse_response");
     const responseBuffer = await response.arrayBuffer();
     const data = new Uint8Array(responseBuffer);
 
@@ -49,12 +58,17 @@ export async function handleOpenAINonStreamRequest(
 
     // Calculate output tokens
     const outputTokens = calculateOutputTokens(contentBlocks);
+    metricsCollector.endPhase(rid, "parse_response", {
+      outputTokens,
+      toolUseCount: toolUses.length,
+    });
 
-    logger.debug(
-      "OpenAI非流式响应Token统计",
+    logger.info(
+      "OpenAI 请求处理完成",
       logger.String("request_id", rid),
       logger.Int("input_tokens", inputTokens),
       logger.Int("output_tokens", outputTokens),
+      logger.Int("tool_uses", toolUses.length),
     );
 
     // 构建Anthropic响应
@@ -74,13 +88,16 @@ export async function handleOpenAINonStreamRequest(
     // 转换为OpenAI格式
     const openaiResponse = convertAnthropicToOpenAI(anthropicResponse, openaiReq.model);
 
+    metricsCollector.endRequest(rid, true);
     return Response.json(openaiResponse);
   } catch (error) {
-    logger.error(
-      "处理OpenAI非流式请求失败",
-      logger.String("request_id", rid),
-      logger.Err(error),
+    errorTracker.track(
+      ErrorCategory.UNKNOWN,
+      "处理 OpenAI 非流式请求失败",
+      error,
+      rid,
     );
+    metricsCollector.endRequest(rid, false, error as Error);
     return respondError("Internal server error", 500);
   }
 }

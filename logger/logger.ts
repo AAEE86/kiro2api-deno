@@ -286,7 +286,14 @@ export function Err(err: Error | unknown): Field {
     return { key: "error", value: null };
   }
   if (err instanceof Error) {
-    return { key: "error", value: err.message };
+    return {
+      key: "error",
+      value: {
+        message: err.message,
+        name: err.name,
+        stack: err.stack,
+      },
+    };
   }
   return { key: "error", value: globalThis.String(err) };
 }
@@ -332,6 +339,59 @@ export function LazyAny(key: string, fn: () => unknown): Field {
  */
 export function LazyJson(key: string, obj: unknown): Field {
   return { key, value: () => JSON.stringify(obj) };
+}
+
+/**
+ * HTTP 状态码字段
+ */
+export function HttpStatus(code: number): Field {
+  return { key: "http_status", value: code };
+}
+
+/**
+ * 错误类型分类
+ */
+export function ErrorType(type: string): Field {
+  return { key: "error_type", value: type };
+}
+
+/**
+ * 用户标识（脱敏）
+ */
+export function UserId(id: string): Field {
+  // 只保留前4位和后4位
+  if (id.length <= 8) {
+    return { key: "user_id", value: "****" };
+  }
+  return { key: "user_id", value: `${id.slice(0, 4)}****${id.slice(-4)}` };
+}
+
+/**
+ * 延迟时间（毫秒）
+ */
+export function Latency(ms: number): Field {
+  return { key: "latency_ms", value: ms };
+}
+
+/**
+ * 字节大小
+ */
+export function Bytes(size: number): Field {
+  return { key: "bytes", value: size };
+}
+
+/**
+ * 操作阶段
+ */
+export function Phase(phase: string): Field {
+  return { key: "phase", value: phase };
+}
+
+/**
+ * 重试次数
+ */
+export function RetryCount(count: number): Field {
+  return { key: "retry_count", value: count };
 }
 
 // Global default logger

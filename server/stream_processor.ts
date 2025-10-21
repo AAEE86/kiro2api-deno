@@ -5,6 +5,7 @@ import { SSEStateManager } from "./sse_state_manager.ts";
 import { StopReasonManager, getStopReasonDescription } from "./stop_reason_manager.ts";
 import { ErrorMapper } from "./error_mapper.ts";
 import * as logger from "../logger/logger.ts";
+import { errorTracker, ErrorCategory } from "../logger/error_tracker.ts";
 import { TimeoutError } from "../config/timeout.ts";
 import { StreamEventConverter } from "./stream_event_converter.ts";
 import { StreamTokenManager } from "./stream_token_manager.ts";
@@ -234,6 +235,15 @@ export class StreamProcessorContext extends BaseStreamProcessor {
 
     const exceptionType = (event.exception_type as string) || (event.__type as string);
     this.logException(exceptionType, "max_tokens");
+    
+    // 追踪异常
+    errorTracker.track(
+      ErrorCategory.UPSTREAM_ERROR,
+      `上游异常: ${exceptionType}`,
+      new Error(exceptionType),
+      this.requestId,
+      { exceptionType, stopReason: "max_tokens" },
+    );
 
       // 强制设置 stop_reason 为 max_tokens
       this.stopReasonManager.forceStopReason("max_tokens");
@@ -423,13 +433,24 @@ export class StreamProcessorContext extends BaseStreamProcessor {
       );
     } catch (error) {
       if (error instanceof TimeoutError) {
-        logger.error(
+        const stats = this.timeoutController.getStats();
+        errorTracker.track(
+          ErrorCategory.STREAM_TIMEOUT,
           "流处理超时",
-          logger.String("request_id", this.requestId),
-          logger.String("timeout_type", error.timeoutType),
-          logger.Int("elapsed_ms", this.timeoutController.getStats().elapsed),
-          logger.Int("total_bytes", this.timeoutController.getStats().totalReadBytes),
-          logger.Err(error),
+          error,
+          this.requestId,
+          {
+            timeoutType: error.timeoutType,
+            elapsedMs: stats.elapsed,
+            totalBytes: stats.totalReadBytes,
+          },
+        );
+      } else {
+        errorTracker.track(
+          ErrorCategory.STREAM_INTERRUPTED,
+          "流处理中断",
+          error,
+          this.requestId,
         );
       }
       throw error;

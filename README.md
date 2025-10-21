@@ -297,7 +297,12 @@ kiro2api-deno/
 ├── routes/                     # 路由处理
 │   └── token_admin.ts          # Token 管理路由
 ├── logger/                     # 日志系统
-│   └── logger.ts               # 日志实现
+│   ├── logger.ts               # 基础日志实现
+│   ├── context.ts              # 请求上下文管理
+│   ├── metrics.ts              # 性能指标收集
+│   ├── error_tracker.ts        # 错误追踪和分类
+│   ├── README.md               # 日志系统使用指南
+│   └── example.ts              # 使用示例
 ├── utils/                      # 工具函数
 │   ├── client.ts               # HTTP 客户端
 │   ├── env.ts                  # 环境变量处理
@@ -420,6 +425,72 @@ LOG_LEVEL=debug deno task start
 
 # 使用文本格式日志（更易读）
 LOG_LEVEL=debug LOG_FORMAT=text deno task start
+
+# 输出到文件
+LOG_LEVEL=debug LOG_FILE=./logs/app.log deno task start
+```
+
+### 日志系统优化
+
+项目已对日志系统进行全面优化，提供完整的可观测性支持：
+
+**核心功能**:
+- ✅ **完整错误堆栈**: 保留完整的 Error 对象信息（message, name, stack）
+- ✅ **请求追踪**: 统一的 requestId 追踪请求生命周期
+- ✅ **性能指标**: 自动收集各阶段耗时和性能数据
+- ✅ **错误分类**: 15种预定义错误类型，结构化追踪
+- ✅ **新增字段**: HttpStatus, ErrorType, Latency, Bytes, Phase 等
+- ✅ **全面覆盖**: 10+ 关键模块均已集成详细日志
+
+**覆盖模块**:
+- ✅ Token 刷新 (auth/refresh.ts)
+- ✅ Token 管理 (auth/token_manager.ts)
+- ✅ 请求处理 (server/handlers.ts)
+- ✅ OpenAI 处理 (server/openai_handlers.ts)
+- ✅ 流处理 (server/stream_processor.ts)
+- ✅ 转换器 (converter/converter.ts)
+- ✅ 上游客户端 (utils/codewhisperer_client.ts)
+- ✅ Token API (routes/token_admin.ts)
+
+详细文档:
+- [logger/README.md](./logger/README.md) - 完整使用指南
+- [logger/QUICK_REFERENCE.md](./logger/QUICK_REFERENCE.md) - 快速参考
+- [LOGGING_OPTIMIZATION.md](./LOGGING_OPTIMIZATION.md) - 第一阶段优化
+- [LOGGING_ENHANCEMENT.md](./LOGGING_ENHANCEMENT.md) - 第二阶段增强
+
+#### 日志示例
+
+```json
+{
+  "timestamp": "2025-01-15T10:30:45.123Z",
+  "level": "INFO",
+  "message": "请求完成",
+  "request_id": "abc-123",
+  "success": true,
+  "total_duration": "250ms",
+  "phase_durations": {
+    "parse_request": 5,
+    "get_token": 10,
+    "upstream_request": 200,
+    "parse_response": 35
+  }
+}
+```
+
+#### 故障排查命令
+
+```bash
+# 查找特定请求的所有日志
+cat app.log | jq 'select(.request_id == "abc-123")'
+
+# 统计错误类型
+cat app.log | jq 'select(.error_type) | .error_type' | sort | uniq -c
+
+# 分析性能瓶颈
+cat app.log | jq 'select(.phase_durations) | .phase_durations'
+
+# 查找耗时超过1秒的请求
+cat app.log | jq 'select(.total_duration and (.total_duration | tonumber > 1000))'
 ```
 
 ## 🔗 Claude Code 集成

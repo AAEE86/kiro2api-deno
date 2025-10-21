@@ -6,6 +6,8 @@ import { MODEL_MAP, AWS_ENDPOINTS } from "../config/constants.ts";
 import { handleStreamRequest } from "./stream_processor.ts";
 import { respondError } from "./common.ts";
 import * as logger from "../logger/logger.ts";
+import { metricsCollector } from "../logger/metrics.ts";
+import { errorTracker, ErrorCategory } from "../logger/error_tracker.ts";
 import type { TokenWithUsage } from "../types/common.ts";
 import { RobustEventStreamParser } from "../parser/robust_parser.ts";
 import { calculateInputTokens, calculateOutputTokens } from "../utils/token_calculation.ts";
@@ -43,17 +45,29 @@ export async function handleMessages(
   authService: AuthService,
 ): Promise<Response> {
   const requestId = crypto.randomUUID();
+  metricsCollector.startRequest(requestId);
 
   try {
+    metricsCollector.startPhase(requestId, "parse_request");
     const anthropicReq: AnthropicRequest = await req.json();
+    metricsCollector.endPhase(requestId, "parse_request");
 
     // Validate request
     if (!anthropicReq.messages || anthropicReq.messages.length === 0) {
+      errorTracker.track(
+        ErrorCategory.REQUEST_INVALID_PARAMS,
+        "messages array cannot be empty",
+        new Error("Empty messages array"),
+        requestId,
+      );
+      metricsCollector.endRequest(requestId, false);
       return respondError("messages array cannot be empty", 400);
     }
 
     // Get token with usage
+    metricsCollector.startPhase(requestId, "get_token");
     const tokenWithUsage = await authService.getTokenWithUsage();
+    metricsCollector.endPhase(requestId, "get_token");
 
     if (anthropicReq.stream) {
       // Use StreamProcessor for streaming requests
@@ -62,11 +76,13 @@ export async function handleMessages(
       return await handleNonStreamRequest(anthropicReq, tokenWithUsage.tokenInfo, requestId);
     }
   } catch (error) {
-    logger.error(
+    errorTracker.track(
+      ErrorCategory.UNKNOWN,
       "处理 messages 请求失败",
-      logger.String("request_id", requestId),
-      logger.Err(error),
+      error,
+      requestId,
     );
+    metricsCollector.endRequest(requestId, false, error as Error);
     return respondError("Internal server error", 500);
   }
 }
@@ -79,28 +95,64 @@ async function handleStreamingRequest(
   requestId: string,
 ): Promise<Response> {
   const conversationId = crypto.randomUUID();
+  
+  metricsCollector.startPhase(requestId, "convert_request");
   const cwReq = anthropicToCodeWhisperer(anthropicReq, conversationId);
+  metricsCollector.endPhase(requestId, "convert_request");
 
-  logger.debug(
+  logger.info(
     "发送流式请求到 CodeWhisperer",
     logger.String("request_id", requestId),
-    logger.String("direction", "upstream_request"),
     logger.String("model", anthropicReq.model),
+    logger.Bool("stream", true),
   );
 
-  const upstreamResponse = await fetch(AWS_ENDPOINTS.CODEWHISPERER, {
-    method: "POST",
-    headers: createCodeWhispererHeaders(tokenWithUsage.tokenInfo.accessToken),
-    body: JSON.stringify(cwReq),
-  });
+  metricsCollector.startPhase(requestId, "upstream_request");
+  const startTime = Date.now();
+  
+  try {
+    const upstreamResponse = await fetch(AWS_ENDPOINTS.CODEWHISPERER, {
+      method: "POST",
+      headers: createCodeWhispererHeaders(tokenWithUsage.tokenInfo.accessToken),
+      body: JSON.stringify(cwReq),
+    });
+    
+    const latency = Date.now() - startTime;
+    metricsCollector.endPhase(requestId, "upstream_request", {
+      status: upstreamResponse.status,
+      latency,
+    });
 
-  // Use StreamProcessor to handle the streaming response
-  return await handleStreamRequest(
-    anthropicReq,
-    tokenWithUsage,
-    requestId,
-    upstreamResponse,
-  );
+    logger.info(
+      "收到上游响应",
+      logger.String("request_id", requestId),
+      logger.HttpStatus(upstreamResponse.status),
+      logger.Latency(latency),
+    );
+
+    // Use StreamProcessor to handle the streaming response
+    return await handleStreamRequest(
+      anthropicReq,
+      tokenWithUsage,
+      requestId,
+      upstreamResponse,
+    );
+  } catch (error) {
+    const latency = Date.now() - startTime;
+    metricsCollector.endPhase(requestId, "upstream_request", {
+      error: error instanceof Error ? error.message : String(error),
+      latency,
+    });
+    
+    errorTracker.track(
+      ErrorCategory.UPSTREAM_ERROR,
+      "上游请求失败",
+      error,
+      requestId,
+      { latency },
+    );
+    throw error;
+  }
 }
 
 // Handle non-streaming requests with TokenEstimator
@@ -110,84 +162,112 @@ async function handleNonStreamRequest(
   requestId: string,
 ): Promise<Response> {
   const conversationId = crypto.randomUUID();
+  
+  metricsCollector.startPhase(requestId, "convert_request");
   const cwReq = anthropicToCodeWhisperer(anthropicReq, conversationId);
+  metricsCollector.endPhase(requestId, "convert_request");
 
   // Calculate input tokens
   const inputTokens = calculateInputTokens(anthropicReq);
 
-  logger.debug(
-    "发送请求到 CodeWhisperer",
+  logger.info(
+    "发送非流式请求到 CodeWhisperer",
     logger.String("request_id", requestId),
+    logger.String("model", anthropicReq.model),
     logger.Int("input_tokens", inputTokens),
+    logger.Bool("stream", false),
   );
 
-  const response = await sendCodeWhispererRequest(cwReq, tokenInfo.accessToken, requestId);
-
-  // Read and parse response
-  const responseBuffer = await response.arrayBuffer();
-  const data = new Uint8Array(responseBuffer);
-  logger.debug("CodeWhisperer 响应大小", logger.Int("size", data.length));
-
-  const parser = new RobustEventStreamParser();
-  const messages = parser.parseStream(data);
+  metricsCollector.startPhase(requestId, "upstream_request");
+  const startTime = Date.now();
   
-  logger.debug(
-    "解析消息",
-    logger.String("request_id", requestId),
-    logger.Int("message_count", messages.length),
-  );
+  try {
+    const response = await sendCodeWhispererRequest(cwReq, tokenInfo.accessToken, requestId);
+    const latency = Date.now() - startTime;
+    
+    metricsCollector.endPhase(requestId, "upstream_request", {
+      status: response.status,
+      latency,
+    });
 
-  // Parse content and tool uses
-  const { content, toolUses } = parseEventStreamResponse(messages, requestId);
-
-  logger.debug(
-    "提取内容",
-    logger.String("request_id", requestId),
-    logger.Int("content_length", content.length),
-  );
-  logger.debug(
-    "提取工具使用",
-    logger.String("request_id", requestId),
-    logger.Int("tool_use_count", toolUses.length),
-  );
-  if (toolUses.length > 0) {
+    // Read and parse response
+    metricsCollector.startPhase(requestId, "parse_response");
+    const responseBuffer = await response.arrayBuffer();
+    const data = new Uint8Array(responseBuffer);
+    
     logger.debug(
-      "工具使用详情",
+      "收到上游响应",
       logger.String("request_id", requestId),
-      logger.Any("tool_uses", toolUses),
+      logger.HttpStatus(response.status),
+      logger.Latency(latency),
+      logger.Bytes(data.length),
     );
+
+    const parser = new RobustEventStreamParser();
+    const messages = parser.parseStream(data);
+    metricsCollector.endPhase(requestId, "parse_response", {
+      messageCount: messages.length,
+    });
+
+    // Parse content and tool uses
+    metricsCollector.startPhase(requestId, "extract_content");
+    const { content, toolUses } = parseEventStreamResponse(messages, requestId);
+    metricsCollector.endPhase(requestId, "extract_content", {
+      contentLength: content.length,
+      toolUseCount: toolUses.length,
+    });
+
+    // Build content blocks
+    const contentBlocks: Array<{ type: string; text?: string; id?: string; name?: string; input?: unknown }> = [];
+    if (content) {
+      contentBlocks.push({ type: "text", text: content });
+    }
+    contentBlocks.push(...toolUses);
+
+    // Calculate output tokens
+    const outputTokens = calculateOutputTokens(contentBlocks);
+
+    logger.info(
+      "请求处理完成",
+      logger.String("request_id", requestId),
+      logger.Int("input_tokens", inputTokens),
+      logger.Int("output_tokens", outputTokens),
+      logger.Int("tool_uses", toolUses.length),
+    );
+
+    metricsCollector.endRequest(requestId, true);
+
+    // Convert response to Anthropic format
+    const anthropicResponse = {
+      id: generateId("msg"),
+      type: "message",
+      role: "assistant",
+      model: anthropicReq.model,
+      content: contentBlocks,
+      stop_reason: toolUses.length > 0 ? "tool_use" : "end_turn",
+      usage: {
+        input_tokens: inputTokens,
+        output_tokens: outputTokens,
+      },
+    };
+
+    return Response.json(anthropicResponse);
+  } catch (error) {
+    const latency = Date.now() - startTime;
+    metricsCollector.endPhase(requestId, "upstream_request", {
+      error: error instanceof Error ? error.message : String(error),
+      latency,
+    });
+    
+    errorTracker.track(
+      ErrorCategory.UPSTREAM_ERROR,
+      "非流式请求失败",
+      error,
+      requestId,
+      { latency },
+    );
+    
+    metricsCollector.endRequest(requestId, false, error as Error);
+    throw error;
   }
-
-  // Build content blocks
-  const contentBlocks: Array<{ type: string; text?: string; id?: string; name?: string; input?: unknown }> = [];
-  if (content) {
-    contentBlocks.push({ type: "text", text: content });
-  }
-  contentBlocks.push(...toolUses);
-
-  // Calculate output tokens
-  const outputTokens = calculateOutputTokens(contentBlocks);
-
-  logger.debug(
-    "Token统计",
-    logger.String("request_id", requestId),
-    logger.Int("input_tokens", inputTokens),
-    logger.Int("output_tokens", outputTokens),
-  );
-
-  // Convert response to Anthropic format
-  const anthropicResponse = {
-    id: generateId("msg"),
-    type: "message",
-    role: "assistant",
-    model: anthropicReq.model,
-    content: contentBlocks,
-    stop_reason: toolUses.length > 0 ? "tool_use" : "end_turn",
-    usage: {
-      input_tokens: inputTokens,
-      output_tokens: outputTokens,
-    },
-  };
-
-  return Response.json(anthropicResponse);
 }

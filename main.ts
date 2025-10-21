@@ -225,6 +225,7 @@ async function handleRequest(
     logger.error(
       "请求处理失败",
       logger.String("request_id", requestId),
+      logger.String("method", req.method),
       logger.String("path", url.pathname),
       logger.Err(error),
     );
@@ -249,23 +250,39 @@ let globalClientToken: string | null | undefined = null;
 
 // Initialize function (called once on startup)
 async function initialize() {
+  const startTime = Date.now();
+  logger.info("开始初始化服务...");
+  
   // Load environment variables from .env file if it exists (local only)
   try {
     const env = await Deno.readTextFile(".env");
+    let loadedCount = 0;
     env.split("\n").forEach((line) => {
       const match = line.match(/^([^=]+)=(.*)$/);
       if (match) {
         const [, key, value] = match;
         Deno.env.set(key.trim(), value.trim());
+        loadedCount++;
       }
     });
-    logger.info("已加载 .env 文件");
+    logger.info(
+      "已加载 .env 文件",
+      logger.Int("env_count", loadedCount),
+    );
   } catch {
     logger.info("未找到 .env 文件，使用环境变量");
   }
 
   // Reinitialize logger after loading env vars
   logger.reinitialize();
+  
+  logger.info(
+    "日志系统配置",
+    logger.String("level", Deno.env.get("LOG_LEVEL") || "info"),
+    logger.String("format", Deno.env.get("LOG_FORMAT") || "json"),
+    logger.Bool("console", Deno.env.get("LOG_CONSOLE") !== "false"),
+    logger.String("file", Deno.env.get("LOG_FILE") || "none"),
+  );
 
   // Get configuration
   globalClientToken = Deno.env.get("KIRO_CLIENT_TOKEN");
@@ -279,8 +296,20 @@ async function initialize() {
 
   // Create AuthService
   logger.info("正在创建 AuthService...");
+  const authStartTime = Date.now();
   globalAuthService = await AuthService.create();
-  logger.info("AuthService 初始化成功");
+  const authDuration = Date.now() - authStartTime;
+  
+  logger.info(
+    "AuthService 初始化成功",
+    logger.Duration("duration", authDuration),
+  );
+  
+  const totalDuration = Date.now() - startTime;
+  logger.info(
+    "服务初始化完成",
+    logger.Duration("total_duration", totalDuration),
+  );
 }
 
 // Request handler wrapper with lazy initialization
@@ -322,33 +351,29 @@ async function main() {
   try {
     await initialize();
 
-    logger.debug(
-      "日志系统初始化完成",
-      logger.String("config_level", Deno.env.get("LOG_LEVEL") || "info"),
-      logger.String("config_file", Deno.env.get("LOG_FILE") || "none"),
-    );
-
-    logger.info(`正在启动服务器...`, logger.Int("port", port));
+    logger.info(`正在启动 HTTP 服务器...`, logger.Int("port", port));
 
     Deno.serve({
       port,
       onListen: ({ hostname, port }) => {
         logger.info(
-          `启动 Anthropic API 代理服务器`,
-          logger.String("port", String(port)),
-          logger.String("auth_token", "***"),
+          `✅ 服务器启动成功`,
+          logger.String("host", hostname),
+          logger.Int("port", port),
+          logger.String("env", isDenoDeployment ? "Deno Deploy" : "Local"),
         );
-        logger.info("AuthToken 验证已启用");
-        logger.info("可用端点:");
-        logger.info("  GET  /                        - Web 管理界面");
-        logger.info("  GET  /api/tokens                  - Token 池状态 (API)");
-        logger.info("  GET  /v1/models                   - 模型列表");
-        logger.info("  POST /v1/messages                 - Anthropic API 代理");
-        logger.info("  POST /v1/messages/count_tokens    - Token 计数接口");
-        logger.info("  POST /v1/chat/completions         - OpenAI API 代理");
-        logger.info("按 Ctrl+C 停止服务器");
-        logger.info(`\n🚀 kiro2api (Deno) listening on http://${hostname}:${port}\n`);
-        logger.info(`📊 Web Dashboard: http://${hostname}:${port}\n`);
+        
+        console.log(`\n🚀 kiro2api-deno 已启动`);
+        console.log(`🌐 地址: http://${hostname}:${port}`);
+        console.log(`📊 管理面板: http://${hostname}:${port}`);
+        console.log(`🔑 认证: 已启用`);
+        console.log(`\n可用端点:`);
+        console.log(`  GET  /                        - Web 管理界面`);
+        console.log(`  GET  /api/tokens              - Token 池状态`);
+        console.log(`  GET  /v1/models               - 模型列表`);
+        console.log(`  POST /v1/messages             - Anthropic API`);
+        console.log(`  POST /v1/chat/completions     - OpenAI API`);
+        console.log(`\n按 Ctrl+C 停止服务器\n`);
       },
     }, handleRequestWithInit);
   } catch (error) {

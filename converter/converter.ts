@@ -79,14 +79,29 @@ export function anthropicToCodeWhisperer(
   const effectiveAgentContinuationId = agentContinuationId || crypto.randomUUID();
 
   if (!req.messages || req.messages.length === 0) {
-    throw new Error("messages is empty");
+    const error = new Error("messages is empty");
+    logger.error("请求验证失败", logger.Err(error));
+    throw error;
   }
 
   // Get the model ID
   const modelId = MODEL_MAP[req.model];
   if (!modelId) {
+    logger.error(
+      "未知模型",
+      logger.String("model", req.model),
+      logger.Any("available_models", Object.keys(MODEL_MAP)),
+    );
     throw new ModelNotFoundErrorType(req.model, effectiveAgentContinuationId);
   }
+  
+  logger.debug(
+    "开始转换请求",
+    logger.String("model", req.model),
+    logger.String("model_id", modelId),
+    logger.Int("message_count", req.messages.length),
+    logger.Bool("has_tools", !!(req.tools && req.tools.length > 0)),
+  );
 
   // Extract the last message content
   const lastMessage = req.messages[req.messages.length - 1];
@@ -305,7 +320,24 @@ const cwReq: CodeWhispererRequest = {
 };
 
   // Validate request before sending
-  validateCodeWhispererRequest(cwReq);
+  try {
+    validateCodeWhispererRequest(cwReq);
+    
+    logger.debug(
+      "请求转换完成",
+      logger.String("conversation_id", conversationId),
+      logger.Int("history_length", history.length),
+      logger.Bool("has_images", images.length > 0),
+      logger.Bool("has_tool_results", currentToolResults.length > 0),
+    );
+  } catch (error) {
+    logger.error(
+      "请求验证失败",
+      logger.Err(error),
+      logger.LazyJson("request", cwReq),
+    );
+    throw error;
+  }
 
   return cwReq;
 }

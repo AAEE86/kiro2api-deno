@@ -2,6 +2,7 @@ import { loadAuthConfigs } from "./config.ts";
 import { TokenManager } from "./token_manager.ts";
 import type { TokenInfo, TokenWithUsage } from "../types/common.ts";
 import * as logger from "../logger/logger.ts";
+import { errorTracker, ErrorCategory } from "../logger/error_tracker.ts";
 
 export class AuthService {
   private tokenManager: TokenManager;
@@ -48,12 +49,30 @@ export class AuthService {
 
   // Get a valid token
   async getToken(): Promise<TokenInfo> {
-    return await this.tokenManager.getBestToken();
+    try {
+      return await this.tokenManager.getBestToken();
+    } catch (error) {
+      errorTracker.track(
+        ErrorCategory.AUTH_NO_AVAILABLE_TOKEN,
+        "获取可用 Token 失败",
+        error,
+      );
+      throw error;
+    }
   }
 
   // Get token with usage information
   async getTokenWithUsage(): Promise<TokenWithUsage> {
-    return await this.tokenManager.getBestTokenWithUsage();
+    try {
+      return await this.tokenManager.getBestTokenWithUsage();
+    } catch (error) {
+      errorTracker.track(
+        ErrorCategory.AUTH_NO_AVAILABLE_TOKEN,
+        "获取可用 Token（含使用量）失败",
+        error,
+      );
+      throw error;
+    }
   }
 
   // Get token pool status
