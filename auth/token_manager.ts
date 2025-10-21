@@ -19,9 +19,78 @@ export class TokenManager {
   private currentIndex = 0;
   private exhausted: Set<number> = new Set();
   private refreshLocks: Map<number, Promise<TokenInfo>> = new Map();
+  
+  // 缓存清理配置
+  private readonly CACHE_TTL_MS = 24 * 60 * 60 * 1000; // 24小时
+  private readonly CLEANUP_INTERVAL_MS = 60 * 60 * 1000; // 1小时
+  private cleanupTimer?: number;
 
   constructor(configs: AuthConfig[]) {
     this.configs = configs;
+    this.startCacheCleanup();
+  }
+
+  /**
+   * 启动定期缓存清理任务
+   * 防止内存泄漏
+   */
+  private startCacheCleanup(): void {
+    this.cleanupTimer = setInterval(() => {
+      this.cleanupExpiredCache();
+    }, this.CLEANUP_INTERVAL_MS);
+    
+    logger.debug("缓存清理任务已启动", logger.Int("interval_ms", this.CLEANUP_INTERVAL_MS));
+  }
+
+  /**
+   * 清理过期的缓存条目
+   * 包括过期的 token 和长时间未使用的缓存
+   */
+  private cleanupExpiredCache(): void {
+    const now = Date.now();
+    let cleanedCount = 0;
+    let expiredCount = 0;
+    let staleCount = 0;
+    
+    for (const [key, cache] of this.tokenCache.entries()) {
+      const age = now - cache.cachedAt.getTime();
+      const isExpired = this.isTokenExpired(cache.token);
+      const isStale = age > this.CACHE_TTL_MS;
+      
+      if (isExpired || isStale) {
+        this.tokenCache.delete(key);
+        cleanedCount++;
+        if (isExpired) expiredCount++;
+        if (isStale) staleCount++;
+      }
+    }
+    
+    if (cleanedCount > 0) {
+      logger.info(
+        "清理过期缓存",
+        logger.Int("total_cleaned", cleanedCount),
+        logger.Int("expired", expiredCount),
+        logger.Int("stale", staleCount),
+        logger.Int("remaining", this.tokenCache.size)
+      );
+    }
+  }
+
+  /**
+   * 停止缓存清理任务并清理所有资源
+   * 用于优雅关闭
+   */
+  public destroy(): void {
+    if (this.cleanupTimer !== undefined) {
+      clearInterval(this.cleanupTimer);
+      this.cleanupTimer = undefined;
+    }
+    
+    this.tokenCache.clear();
+    this.refreshLocks.clear();
+    this.exhausted.clear();
+    
+    logger.info("TokenManager 资源已清理");
   }
 
   // Warm up all tokens by refreshing them
@@ -121,83 +190,132 @@ export class TokenManager {
     throw new Error("All token configurations failed");
   }
 
-  // Get or refresh a specific token
+  /**
+   * 获取或刷新指定的 token
+   * 使用双重检查锁定模式防止并发刷新
+   */
   private async getOrRefreshToken(
     configIndex: number,
     config: AuthConfig,
   ): Promise<TokenInfo> {
-    // Check cache first
+    // 第一次检查（快速路径）
     const cached = this.tokenCache.get(configIndex);
     if (cached && !this.isTokenExpired(cached.token)) {
       return cached.token;
     }
 
-    // Check if refresh is already in progress
-    const existingRefresh = this.refreshLocks.get(configIndex);
+    // 检查是否已有刷新进行中
+    let existingRefresh = this.refreshLocks.get(configIndex);
     if (existingRefresh) {
+      logger.debug(
+        "等待现有刷新完成",
+        logger.Int("config_index", configIndex)
+      );
       return await existingRefresh;
     }
 
-    // Start refresh
-    const refreshPromise = this.performRefresh(configIndex, config);
+    // 创建刷新 Promise（包含二次检查）
+    const refreshPromise = (async () => {
+      // 再次检查缓存（可能在等待锁时已被刷新）
+      const recheck = this.tokenCache.get(configIndex);
+      if (recheck && !this.isTokenExpired(recheck.token)) {
+        logger.debug(
+          "缓存已在等待期间刷新",
+          logger.Int("config_index", configIndex)
+        );
+        return recheck.token;
+      }
+      
+      return await this.performRefresh(configIndex, config);
+    })();
+
+    // 设置刷新锁
     this.refreshLocks.set(configIndex, refreshPromise);
 
     try {
       const token = await refreshPromise;
       return token;
-    } finally {
+    } catch (error) {
+      // 刷新失败时清理锁，允许重试
       this.refreshLocks.delete(configIndex);
+      logger.error(
+        "Token 刷新失败，已清理锁",
+        logger.Int("config_index", configIndex),
+        logger.Err(error)
+      );
+      throw error;
     }
   }
 
-  // Perform actual token refresh
+  /**
+   * 执行实际的 token 刷新操作
+   * 刷新成功后自动清理锁
+   */
   private async performRefresh(
     configIndex: number,
     config: AuthConfig,
   ): Promise<TokenInfo> {
+    const startTime = Date.now();
+    
     logger.info(
-      "刷新 token",
+      "开始刷新 token",
       logger.Int("config_index", configIndex),
       logger.String("auth_type", config.auth),
     );
 
-    const token = await refreshToken(config);
-
-    // Check usage limits
-    const checker = new UsageLimitsChecker();
-    let available = 0;
-    let usageInfo = null;
-
     try {
-      usageInfo = await checker.checkUsageLimits(token);
-      if (usageInfo) {
-        available = calculateAvailableCount(usageInfo);
+      const token = await refreshToken(config);
+
+      // Check usage limits
+      const checker = new UsageLimitsChecker();
+      let available = 0;
+      let usageInfo = null;
+
+      try {
+        usageInfo = await checker.checkUsageLimits(token);
+        if (usageInfo) {
+          available = calculateAvailableCount(usageInfo);
+        }
+      } catch (error) {
+        logger.warn("检查使用限制失败", logger.Err(error));
       }
+
+      // Cache the token with usage info
+      this.tokenCache.set(configIndex, {
+        token,
+        configIndex,
+        cachedAt: new Date(),
+        lastUsed: new Date(),
+        available,
+        usageInfo,
+      });
+
+      // Remove from exhausted set
+      this.exhausted.delete(configIndex);
+
+      // 刷新成功后清理锁
+      this.refreshLocks.delete(configIndex);
+
+      const duration = Date.now() - startTime;
+      logger.info(
+        "Token 刷新成功",
+        logger.Int("config_index", configIndex),
+        logger.String("expires_at", token.expiresAt?.toISOString() || "unknown"),
+        logger.Float("available", available),
+        logger.Int("duration_ms", duration)
+      );
+
+      return token;
     } catch (error) {
-      logger.warn("检查使用限制失败", logger.Err(error));
+      const duration = Date.now() - startTime;
+      logger.error(
+        "Token 刷新失败",
+        logger.Int("config_index", configIndex),
+        logger.Int("duration_ms", duration),
+        logger.Err(error)
+      );
+      throw error;
     }
-
-    // Cache the token with usage info
-    this.tokenCache.set(configIndex, {
-      token,
-      configIndex,
-      cachedAt: new Date(),
-      lastUsed: new Date(),
-      available,
-      usageInfo,
-    });
-
-    // Remove from exhausted set
-    this.exhausted.delete(configIndex);
-
-    logger.info(
-      "Token 刷新成功",
-      logger.Int("config_index", configIndex),
-      logger.String("expires_at", token.expiresAt?.toISOString() || "unknown"),
-      logger.Float("available", available)
-    );
-
-    return token;
   }
 
   // Check if token is expired (with 5 minute buffer)

@@ -21,7 +21,7 @@ import type { OpenAIRequest } from "./types/openai.ts";
 import { requestIDMiddleware, validateAPIKey, requiresAuth, getCORSHeaders } from "./server/middleware.ts";
 import { DEFAULTS } from "./config/constants.ts";
 import * as logger from "./logger/logger.ts";
-import { join } from "https://deno.land/std@0.208.0/path/mod.ts";
+import { join, normalize, resolve } from "https://deno.land/std@0.208.0/path/mod.ts";
 
 // Middleware to check authorization
 function checkAuth(req: Request, clientToken: string): boolean {
@@ -36,20 +36,50 @@ function checkAuth(req: Request, clientToken: string): boolean {
   return validateAPIKey(req, clientToken);
 }
 
-// Serve static files
+/**
+ * 安全地提供静态文件服务
+ * 防止路径遍历攻击
+ */
 async function serveStaticFile(pathname: string): Promise<Response> {
   try {
     // Remove leading slash and "static/" prefix if present
-    const filePath = pathname.startsWith("/static/") 
+    const filePath = pathname.startsWith("/static/")
       ? pathname.substring("/static/".length)
       : pathname.substring(1);
     
-    const fullPath = join(Deno.cwd(), "static", filePath);
+    // 规范化路径，移除 .. 和 . 等
+    const normalizedPath = normalize(filePath);
     
+    // 检查是否包含路径遍历尝试
+    if (normalizedPath.includes("..") || normalizedPath.startsWith("/")) {
+      logger.warn(
+        "路径遍历攻击尝试被阻止",
+        logger.String("requested_path", pathname),
+        logger.String("normalized", normalizedPath)
+      );
+      return new Response("Forbidden", { status: 403 });
+    }
+    
+    // 构建完整路径
+    const staticDir = resolve(Deno.cwd(), "static");
+    const fullPath = resolve(staticDir, normalizedPath);
+    
+    // 安全检查：确保最终路径在 static 目录内
+    if (!fullPath.startsWith(staticDir + "/") && fullPath !== staticDir) {
+      logger.warn(
+        "路径遍历攻击尝试被阻止",
+        logger.String("requested_path", pathname),
+        logger.String("full_path", fullPath),
+        logger.String("static_dir", staticDir)
+      );
+      return new Response("Forbidden", { status: 403 });
+    }
+    
+    // 读取文件
     const file = await Deno.readFile(fullPath);
     
     // Determine content type based on file extension
-    const ext = filePath.split(".").pop()?.toLowerCase();
+    const ext = normalizedPath.split(".").pop()?.toLowerCase();
     const contentTypes: Record<string, string> = {
       "html": "text/html; charset=utf-8",
       "css": "text/css; charset=utf-8",
@@ -70,11 +100,29 @@ async function serveStaticFile(pathname: string): Promise<Response> {
       headers: {
         "Content-Type": contentType,
         "Cache-Control": "public, max-age=3600",
+        "X-Content-Type-Options": "nosniff", // 安全头：防止 MIME 类型嗅探
       },
     });
-  } catch {
-    logger.debug("Static file not found", logger.String("path", pathname));
-    return new Response("Not Found", { status: 404 });
+  } catch (error) {
+    // 详细的错误分类
+    if (error instanceof Deno.errors.NotFound) {
+      logger.debug("静态文件不存在", logger.String("path", pathname));
+      return new Response("Not Found", { status: 404 });
+    } else if (error instanceof Deno.errors.PermissionDenied) {
+      logger.error(
+        "文件权限错误",
+        logger.String("path", pathname),
+        logger.Err(error)
+      );
+      return new Response("Forbidden", { status: 403 });
+    } else {
+      logger.error(
+        "读取静态文件失败",
+        logger.String("path", pathname),
+        logger.Err(error)
+      );
+      return new Response("Internal Server Error", { status: 500 });
+    }
   }
 }
 
