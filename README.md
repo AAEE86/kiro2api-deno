@@ -1,3 +1,8 @@
+# 已废弃
+
+推荐使用 https://github.com/hank9999/kiro.rs
+
+---
 # kiro2api-deno
 
 **高性能 AI API 代理服务器 - Deno 实现**
